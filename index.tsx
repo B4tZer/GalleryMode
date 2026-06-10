@@ -103,6 +103,7 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
 
             const queryParams: any = { has: searchTag, offset: currentOffset };
             if (isGuild) queryParams.channel_id = channel.id;
+            if (channel.nsfw || channel.isNSFW?.()) queryParams.include_nsfw = true;
 
             const response = await RestAPI.get({ url: searchUrl, query: queryParams });
 
