@@ -23,7 +23,7 @@ type FilterType = "all" | "images" | "gifs" | "videos";
 
 const JumpAction = findByPropsLazy("jumpToMessage");
 const FavoriteButton = findComponentByCodeLazy<FavoriteButtonProps>("#{intl::GIF_TOOLTIP_ADD_TO_FAVORITES}");
-const PAGE_SIZE = 25;
+const PAGE_SIZE = 100;
 
 const Quality = {
     High: 1,
