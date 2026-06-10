@@ -12,6 +12,7 @@ import type { FavoriteButtonProps } from "@equicordplugins/favouriteAnything/typ
 type MediaItem = {
     key: string;
     url: string;
+    proxyUrl?: string;
     sourceUrl: string;
     isGif: boolean;
     isVideo: boolean;
@@ -260,10 +261,11 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
             const extractedMedia: MediaItem[] = [];
 
             foundMessages.forEach((msg: any) => {
-                const addMedia = (url: string, forceGif = false, sourceUrl?: string) => {
+                const addMedia = (url: string, forceGif = false, sourceUrl?: string, proxyUrl?: string) => {
                     if (!url) return;
                     const normalizedUrl = normalizeUrl(url);
                     const normalizedSourceUrl = normalizeUrl(sourceUrl || url);
+                    const normalizedProxyUrl = proxyUrl ? normalizeUrl(proxyUrl) : undefined;
                     const lowerUrl = url.toLowerCase();
                     const isVideoExt = !!lowerUrl.match(/\.(mp4|webm|mov)($|\?)/i);
                     const isGifExt = forceGif || !!lowerUrl.match(/\.(gif)($|\?)/i) || url.includes("tenor.com");
@@ -272,6 +274,7 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
                         extractedMedia.push({
                             key,
                             url: normalizedUrl,
+                            proxyUrl: normalizedProxyUrl,
                             sourceUrl: normalizedSourceUrl,
                             isGif: isGifExt,
                             isVideo: isVideoExt && !isGifExt,
@@ -282,16 +285,17 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
 
                 msg.attachments?.forEach((a: any) => {
                     if (a.content_type?.startsWith("image/") || a.content_type?.startsWith("video/"))
-                        addMedia(a.url || a.proxy_url);
+                        addMedia(a.url || a.proxy_url, false, undefined, a.proxy_url);
                 });
 
                 msg.embeds?.forEach((e: any) => {
-                    if (e.type === "image" && e.image?.url) addMedia(e.image.url);
+                    if (e.type === "image" && e.image?.url)
+                        addMedia(e.image.url, false, undefined, e.image.proxyURL);
                     else if (e.type === "video" && e.video?.url) {
-                        addMedia(e.video.url, e.provider?.name === "Tenor" || e.url?.includes("tenor"), e.url || e.video.url);
+                        addMedia(e.video.url, e.provider?.name === "Tenor" || e.url?.includes("tenor"), e.url || e.video.url, e.video.proxyURL);
                     }
                     else if (e.type === "gifv" && e.video?.url) {
-                        addMedia(e.video.url, true, e.url || e.video.url);
+                        addMedia(e.video.url, true, e.url || e.video.url, e.video.proxyURL);
                     }
                 });
             });
@@ -348,11 +352,16 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
         const size = mediaSizes[item.key];
         if (!size) return null;
 
+        // Mirror native embed: VIDEO format for mp4/webm sources, IMAGE for static GIFs
+        const isVideoGif = !!item.url.match(/\.(mp4|webm|mov)($|\?)/i);
+        const format = isVideoGif ? FavouriteItemFormat.VIDEO : FavouriteItemFormat.IMAGE;
+        // Prefer CDN proxy URL for src (matches native embed EmbedAccessory behavior)
+        const src = item.proxyUrl || item.url;
+
         return {
-            format: FavouriteItemFormat.IMAGE,
-            src: item.url,
+            format,
+            src,
             url: getGifFavoriteUrl(item),
-            gifSrc: getGifFavoriteUrl(item),
             width: size.width,
             height: size.height
         } satisfies FavoriteButtonProps;
