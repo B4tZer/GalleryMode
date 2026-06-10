@@ -1,4 +1,5 @@
-import definePlugin from "@utils/types";
+import { definePluginSettings } from "@api/Settings";
+import definePlugin, { OptionType } from "@utils/types";
 import { findGroupChildrenByChildId } from "@api/ContextMenu";
 import { Menu, Text, RestAPI, Modal, openModal, useState, useEffect, useRef } from "@webpack/common";
 import { findByPropsLazy, findComponentByCodeLazy } from "@webpack";
@@ -23,6 +24,14 @@ const JumpAction = findByPropsLazy("jumpToMessage");
 const FavoriteButton = findComponentByCodeLazy<FavoriteButtonProps>("#{intl::GIF_TOOLTIP_ADD_TO_FAVORITES}");
 const PAGE_SIZE = 25;
 
+const settings = definePluginSettings({
+    gridColumns: {
+        type: OptionType.NUMBER,
+        description: "Number of columns (0 = auto-fill based on card size)",
+        default: 0,
+    },
+});
+
 function normalizeUrl(url: string) {
     return url.startsWith("//") ? `https:${url}` : url;
 }
@@ -38,6 +47,9 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
     const [searchOffset, setSearchOffset] = useState(0);
     const [hasMore, setHasMore] = useState(true);
     const [mediaSizes, setMediaSizes] = useState<Record<string, { width: number; height: number; }>>({});
+
+    const columnCount = settings.store.gridColumns ?? 0;
+    const gridColumns = columnCount > 0 ? String(columnCount) : "auto-fill";
 
     const mountedRef = useRef(true);
     const fetchingRef = useRef(false);
@@ -229,7 +241,7 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
     });
 
     return (
-        <Modal {...modalProps} size="large" title={`Gallery: ${channel.name}`}>
+        <Modal {...modalProps} size="dynamic" title={`Gallery: ${channel.name}`}>
             <div style={{ display: "flex", gap: "8px", marginBottom: "16px", flexWrap: "wrap" }}>
                 <FilterButton label="All Media" type="all" />
                 <FilterButton label="Images" type="images" />
@@ -242,7 +254,7 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
             </div>
 
             <div style={{ maxHeight: "60vh", overflowY: "auto" }} onScroll={handleScroll}>
-                <div className="vc-gallery-grid">
+                <div className="vc-gallery-grid" style={{ "--vc-gallery-column-count": gridColumns } as any}>
                     {displayedMedia.map(item => {
                         const favoriteProps = getFavoriteButtonProps(item);
 
@@ -311,6 +323,7 @@ export default definePlugin({
     name: "ChannelGalleryMode",
     description: "Infinitely scrolling media gallery with filtering and message context jumping.",
     authors: [{ name: "Equicord User", id: 0n }],
+    settings,
     contextMenus: {
         "channel-context": (children, { channel }) => {
             const group = findGroupChildrenByChildId("mark-channel-read", children) ?? children;
