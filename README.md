@@ -1,18 +1,16 @@
 # GalleryMode
 
-Standalone Equicord user plugin for browsing channel media in a gallery view.
+Standalone plugin repo.
+
+## Files
+
+- `GalleryMode/index.tsx`
+- `GalleryMode/style.css`
 
 ## Install
 
-Copy `index.tsx` and `style.css` into:
+Copy the `GalleryMode/` folder into:
 
-`src/userplugins/GalleryMode/`
+`src/userplugins/`
 
 Then rebuild/restart Equicord.
-
-## Features
-
-- Open a gallery from a channel context menu
-- Filter images, GIFs, and videos
-- Jump back to the source message
-- Native GIF favorite button support
