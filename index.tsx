@@ -57,7 +57,24 @@ const settings = definePluginSettings({
             { label: "Horrible", value: Quality.Horrible },
         ],
     },
+    cacheTtlMinutes: {
+        type: OptionType.NUMBER,
+        description: "Minutes to remember gallery position after closing (0 = disabled)",
+        default: 30,
+    },
 });
+
+type GalleryCache = {
+    mediaItems: MediaItem[];
+    searchOffset: number;
+    hasMore: boolean;
+    mediaSizes: Record<string, { width: number; height: number; }>;
+    activeFilter: FilterType;
+    scrollTop: number;
+    timestamp: number;
+};
+
+let channelCache: { channelId: string; state: GalleryCache; } | null = null;
 
 function normalizeUrl(url: string) {
     return url.startsWith("//") ? `https:${url}` : url;
@@ -99,23 +116,72 @@ function getQualityUrl(url: string, qualityLevel: number) {
 }
 
 function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }) {
-    const [isFetching, setIsFetching] = useState(false);
-    const [activeFilter, setActiveFilter] = useState<FilterType>("all");
-    const [mediaItems, setMediaItems] = useState<MediaItem[]>([]);
-    const [searchOffset, setSearchOffset] = useState(0);
-    const [hasMore, setHasMore] = useState(true);
-    const [mediaSizes, setMediaSizes] = useState<Record<string, { width: number; height: number; }>>({});
-
     const columnCount = settings.store.gridColumns ?? 0;
     const gridColumns = columnCount > 0 ? String(columnCount) : "auto-fill";
     const gifQuality = settings.store.gifQuality ?? Quality.High;
 
+    const cacheTtlMinutes = settings.store.cacheTtlMinutes ?? 30;
+    const cacheTtlMs = cacheTtlMinutes > 0 ? cacheTtlMinutes * 60_000 : 0;
+
+    const saved = cacheTtlMs > 0
+        && channelCache?.channelId === channel.id
+        && Date.now() - channelCache.state.timestamp < cacheTtlMs
+        ? channelCache.state
+        : null;
+
+    const [isFetching, setIsFetching] = useState(false);
+    const [activeFilter, setActiveFilter] = useState<FilterType>(saved?.activeFilter ?? "all");
+    const [mediaItems, setMediaItems] = useState<MediaItem[]>(saved?.mediaItems ?? []);
+    const [searchOffset, setSearchOffset] = useState(saved?.searchOffset ?? 0);
+    const [hasMore, setHasMore] = useState(saved?.hasMore ?? true);
+    const [mediaSizes, setMediaSizes] = useState<Record<string, { width: number; height: number; }>>(saved?.mediaSizes ?? {});
+
     const mountedRef = useRef(true);
     const fetchingRef = useRef(false);
+    const scrollRef = useRef<HTMLDivElement>(null);
+    const scrollTopRef = useRef(0);
+    const stateRef = useRef<GalleryCache>({
+        mediaItems: [],
+        searchOffset: 0,
+        hasMore: true,
+        mediaSizes: {},
+        activeFilter: "all",
+        scrollTop: 0,
+        timestamp: 0,
+    });
+
+    // Keep stateRef in sync with the latest committed React state
+    useEffect(() => {
+        stateRef.current = {
+            mediaItems,
+            searchOffset,
+            hasMore,
+            mediaSizes,
+            activeFilter,
+            scrollTop: scrollTopRef.current,
+            timestamp: Date.now(),
+        };
+    });
 
     useEffect(() => {
         return () => { mountedRef.current = false; };
     }, []);
+
+    // Save gallery state on unmount (any close: jump, X button, click-outside)
+    useEffect(() => {
+        if (cacheTtlMs <= 0) return;
+
+        return () => {
+            channelCache = {
+                channelId: channel.id,
+                state: {
+                    ...stateRef.current,
+                    scrollTop: scrollTopRef.current,
+                    timestamp: Date.now(),
+                },
+            };
+        };
+    }, [channel.id, cacheTtlMs]);
 
     const setFetching = (value: boolean) => {
         fetchingRef.current = value;
@@ -252,13 +318,25 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
+    // Restore scroll position from cache after mount
+    useEffect(() => {
+        if (!saved?.scrollTop || !scrollRef.current) return;
+        const el = scrollRef.current;
+        const timer = setTimeout(() => {
+            el.scrollTop = saved.scrollTop!;
+        }, 50);
+        return () => clearTimeout(timer);
+    }, []);
+
     const handleScroll = (e: any) => {
         const { scrollTop, scrollHeight, clientHeight } = e.target;
+        scrollTopRef.current = scrollTop;
         if (scrollHeight - scrollTop <= clientHeight + 800) fetchOlderMessages();
     };
 
     const handleFilterChange = (type: FilterType) => {
         if (activeFilter === type) return;
+        channelCache = null;
         setActiveFilter(type);
         resetGalleryState();
         fetchOlderMessages(true, type);
@@ -312,7 +390,7 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
                 {displayedMedia.length} items loaded{isFetching ? " (loading...)" : ""}
             </div>
 
-            <div style={{ maxHeight: "60vh", overflowY: "auto" }} onScroll={handleScroll}>
+            <div ref={scrollRef} style={{ maxHeight: "60vh", overflowY: "auto" }} onScroll={handleScroll}>
                 <div className="vc-gallery-grid" style={{ "--vc-gallery-column-count": gridColumns } as any}>
                     {displayedMedia.map(item => {
                         const favoriteProps = getFavoriteButtonProps(item);
