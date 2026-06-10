@@ -24,11 +24,38 @@ const JumpAction = findByPropsLazy("jumpToMessage");
 const FavoriteButton = findComponentByCodeLazy<FavoriteButtonProps>("#{intl::GIF_TOOLTIP_ADD_TO_FAVORITES}");
 const PAGE_SIZE = 25;
 
+const Quality = {
+    High: 1,
+    Reasonable: 2,
+    Low: 3,
+    Horrible: 4,
+} as const;
+
+const qualities = [
+    { giphy: "giphy", tenor: "Ax", video: "Po" }, // High ~ 480-native
+    { giphy: "480w", tenor: "A5", video: "P3" },   // Reasonable ~ 360
+    { giphy: "200", tenor: "A1", video: "P2" },    // Low ~ 200
+    { giphy: "100", tenor: "A2", video: "P4" },    // Horrible ~ 120
+];
+
+const mediaTenorRegex = /^https:\/\/(?:media\d?|c)\.tenor\.com(?:\/m)?\/(?<id>.+?)(?<quality>\w{2})\/(?<name>[^/]+)\.(?<ext>gif|webp|mp4|webm)$/i;
+const giphyLinkRegex = /^https:\/\/media\d?\.giphy\.com\/media\/.*?\/(?<code>.*?)\/giphy/i;
+
 const settings = definePluginSettings({
     gridColumns: {
         type: OptionType.NUMBER,
         description: "Number of columns (0 = auto-fill based on card size)",
         default: 0,
+    },
+    gifQuality: {
+        type: OptionType.SELECT,
+        description: "GIF quality level",
+        options: [
+            { label: "High", value: Quality.High, default: true },
+            { label: "Reasonable", value: Quality.Reasonable },
+            { label: "Low", value: Quality.Low },
+            { label: "Horrible", value: Quality.Horrible },
+        ],
     },
 });
 
@@ -38,6 +65,37 @@ function normalizeUrl(url: string) {
 
 function getGifFavoriteUrl(item: Pick<MediaItem, "url" | "sourceUrl">) {
     return normalizeUrl(item.sourceUrl || item.url);
+}
+
+function getQualityUrl(url: string, qualityLevel: number) {
+    const q = qualities[qualityLevel - 1] ?? qualities[0];
+    const cleanUrl = normalizeUrl(url);
+
+    const tenorMatch = cleanUrl.match(mediaTenorRegex);
+    if (tenorMatch) {
+        const { id, name, ext } = tenorMatch.groups!;
+        const isVideo = ext === "mp4" || ext === "webm";
+        return `https://media.tenor.com/${id}${isVideo ? q.video : q.tenor}/${name}.${isVideo ? ext : "webp"}`;
+    }
+
+    const giphyMatch = cleanUrl.match(giphyLinkRegex);
+    if (giphyMatch) {
+        const { code } = giphyMatch.groups!;
+        return `https://i.giphy.com/media/${code}/${q.giphy}.webp`;
+    }
+
+    try {
+        const parsed = new URL(cleanUrl);
+        if (parsed.hostname === "cdn.discordapp.com" || parsed.hostname.endsWith("discordapp.net")) {
+            parsed.searchParams.set("format", "webp");
+            parsed.searchParams.set("animated", "true");
+            return parsed.toString();
+        }
+    } catch {
+        // fall through
+    }
+
+    return cleanUrl;
 }
 
 function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }) {
@@ -50,6 +108,7 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
 
     const columnCount = settings.store.gridColumns ?? 0;
     const gridColumns = columnCount > 0 ? String(columnCount) : "auto-fill";
+    const gifQuality = settings.store.gifQuality ?? Quality.High;
 
     const mountedRef = useRef(true);
     const fetchingRef = useRef(false);
@@ -267,7 +326,7 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
                             ) : null}
                             {item.isVideo || (item.isGif && item.url.match(/\.(mp4|webm|mov)($|\?)/i)) ? (
                                 <video
-                                    src={item.url}
+                                    src={getQualityUrl(item.url, gifQuality)}
                                     controls={!item.isGif}
                                     autoPlay={item.isGif}
                                     muted
@@ -278,7 +337,7 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
                             ) : (
                                 <a href={item.url} target="_blank" rel="noreferrer" style={{ display: "block", width: "100%", height: "100%" }}>
                                     <img
-                                        src={item.url}
+                                        src={getQualityUrl(item.url, gifQuality)}
                                         className="vc-gallery-media"
                                         alt=""
                                         loading="lazy"
