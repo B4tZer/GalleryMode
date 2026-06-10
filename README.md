@@ -15,4 +15,5 @@ Copy the `GalleryMode/` folder into:
 Then rebuild/restart Vencord/Equicord.
 
 ## To Do
-- Save position in viewer after jump
+- Save position in viewer after jump - Done but needs minor tweaking
+  
