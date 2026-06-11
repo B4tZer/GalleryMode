@@ -8,11 +8,18 @@ You need to have the specific chanel open for the jump feature to work!
 
 ## Install
 
-Copy the `GalleryMode/` folder into:
-
-`src/userplugins/`
-
-Then rebuild/restart Vencord/Equicord.
+Direct your terminal to the userplugins folder src/userplugins
+```shell
+git clone https://github.com/Sodroz/GalleryMode
+````
+Then rebuild 
+````
+pnpm build
+````
+````
+pnpm inject
+````
+All Done!
 
 ## To Do
 - Save position in viewer after jump - Done but needs minor tweaking
