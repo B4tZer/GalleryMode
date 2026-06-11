@@ -513,6 +513,27 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
         setTimeout(() => setCopyFeedback(null), 2000);
     };
 
+    const handleDownload = async (item: MediaItem, e: React.MouseEvent) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const url = item.proxyUrl || item.url;
+        try {
+            const res = await fetch(url);
+            const blob = await res.blob();
+            const objectUrl = URL.createObjectURL(blob);
+            const a = document.createElement("a");
+            a.href = objectUrl;
+            const ext = blob.type.split("/")[1] || url.split(".").pop()?.split("?")[0] || "bin";
+            a.download = `${item.messageId}.${ext}`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(objectUrl);
+        } catch {
+            window.open(url, "_blank");
+        }
+    };
+
     return (
         <Modal {...modalProps} size="dynamic" title={`Gallery: ${channel.name}`}>
             <div style={{ display: "flex", gap: "8px", marginBottom: "16px", flexWrap: "wrap", alignItems: "center" }}>
@@ -582,6 +603,7 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
                             ) : null}
                             {isVideoContent ? (
                                 <video
+                                    ref={el => { if (el) el.muted = true; }}
                                     src={getQualityUrl(item.url, gifQuality)}
                                     controls={!item.isGif}
                                     autoPlay={item.isGif}
@@ -611,13 +633,11 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
                                     title="Copy"
                                     onClick={e => handleCopy(item, e)}
                                 >⎘</div>
-                                <a
+                                <div
                                     className="vc-gallery-action-btn"
                                     title="Download"
-                                    href={item.proxyUrl || item.url}
-                                    download={`${item.messageId}`}
-                                    onClick={e => { e.stopPropagation(); }}
-                                >↓</a>
+                                    onClick={e => handleDownload(item, e)}
+                                >↓</div>
                                 <div
                                     className="vc-gallery-action-btn"
                                     title="Jump to message"
