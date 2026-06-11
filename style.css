@@ -1,13 +1,9 @@
-/* style.css */
-
-/* --- Grid Container --- */
 .vc-gallery-grid {
     display: grid;
     grid-template-columns: repeat(var(--vc-gallery-column-count, auto-fill), minmax(180px, 1fr));
     gap: 16px;
 }
 
-/* --- Media Cards --- */
 .vc-gallery-card {
     position: relative;
     width: 100%;
@@ -21,7 +17,6 @@
     contain-intrinsic-block-size: 200px;
 }
 
-/* Float up slightly when hovered */
 .vc-gallery-card:hover {
     transform: translateY(-4px);
     box-shadow: var(--elevation-high);
@@ -33,7 +28,6 @@
     object-fit: cover;
 }
 
-/* --- Jump Button --- */
 .vc-gallery-fav-btn-wrap {
     position: absolute;
     top: 8px;
@@ -83,7 +77,6 @@
     background-color: var(--brand-experiment);
 }
 
-/* --- Filter Buttons --- */
 .vc-gallery-filter-btn {
     padding: 8px 16px;
     border-radius: 20px;

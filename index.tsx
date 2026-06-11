@@ -6,7 +6,6 @@ import { findByPropsLazy, findComponentByCodeLazy } from "@webpack";
 import ErrorBoundary from "@components/ErrorBoundary";
 import "./style.css";
 
-// Inlined from @equicordplugins/favouriteAnything/types for Vencord compat
 enum FavouriteItemFormat { NONE = 0, IMAGE = 1, VIDEO = 2 }
 interface FavoriteButtonProps {
     format: FavouriteItemFormat;
@@ -33,6 +32,7 @@ type FilterType = "all" | "images" | "gifs" | "videos";
 const JumpAction = findByPropsLazy("jumpToMessage");
 const FavoriteButton = findComponentByCodeLazy<FavoriteButtonProps>("#{intl::GIF_TOOLTIP_ADD_TO_FAVORITES}");
 const PAGE_SIZE = 100;
+const VIDEO_EXT_RE = /\.(mp4|webm|mov)($|\?)/i;
 
 const Quality = {
     High: 1,
@@ -119,7 +119,6 @@ function getQualityUrl(url: string, qualityLevel: number) {
             return parsed.toString();
         }
     } catch {
-        // fall through
     }
 
     return cleanUrl;
@@ -160,7 +159,6 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
         timestamp: 0,
     });
 
-    // Keep stateRef in sync with the latest committed React state
     useEffect(() => {
         stateRef.current = {
             mediaItems,
@@ -177,7 +175,6 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
         return () => { mountedRef.current = false; };
     }, []);
 
-    // Save gallery state on unmount (any close: jump, X button, click-outside)
     useEffect(() => {
         if (cacheTtlMs <= 0) return;
 
@@ -268,28 +265,29 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
 
             const foundMessages = response.body.messages.map((hitGroup: any[]) => hitGroup[0]);
             const extractedMedia: MediaItem[] = [];
+            const seenKeys = new Set<string>();
 
             foundMessages.forEach((msg: any) => {
                 const addMedia = (url: string, forceGif = false, sourceUrl?: string, proxyUrl?: string) => {
                     if (!url) return;
                     const normalizedUrl = normalizeUrl(url);
+                    const key = `${msg.id}:${normalizedUrl}`;
+                    if (seenKeys.has(key)) return;
+                    seenKeys.add(key);
                     const normalizedSourceUrl = normalizeUrl(sourceUrl || url);
                     const normalizedProxyUrl = proxyUrl ? normalizeUrl(proxyUrl) : undefined;
                     const lowerUrl = url.toLowerCase();
-                    const isVideoExt = !!lowerUrl.match(/\.(mp4|webm|mov)($|\?)/i);
+                    const isVideoExt = VIDEO_EXT_RE.test(lowerUrl);
                     const isGifExt = forceGif || !!lowerUrl.match(/\.(gif)($|\?)/i) || url.includes("tenor.com");
-                    const key = `${msg.id}:${normalizedUrl}`;
-                    if (!extractedMedia.some(item => item.key === key)) {
-                        extractedMedia.push({
-                            key,
-                            url: normalizedUrl,
-                            proxyUrl: normalizedProxyUrl,
-                            sourceUrl: normalizedSourceUrl,
-                            isGif: isGifExt,
-                            isVideo: isVideoExt && !isGifExt,
-                            messageId: msg.id
-                        });
-                    }
+                    extractedMedia.push({
+                        key,
+                        url: normalizedUrl,
+                        proxyUrl: normalizedProxyUrl,
+                        sourceUrl: normalizedSourceUrl,
+                        isGif: isGifExt,
+                        isVideo: isVideoExt && !isGifExt,
+                        messageId: msg.id
+                    });
                 };
 
                 msg.attachments?.forEach((a: any) => {
@@ -310,8 +308,10 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
             });
 
             setMediaItems(prev => {
-                const combined = isResetting ? extractedMedia : [...prev, ...extractedMedia];
-                return combined.filter((v, i, a) => a.findIndex(t => t.key === v.key) === i);
+                if (isResetting) return extractedMedia;
+                const seen = new Set(prev.map(item => item.key));
+                const newItems = extractedMedia.filter(item => !seen.has(item.key));
+                return [...prev, ...newItems];
             });
 
             setSearchOffset(currentOffset + PAGE_SIZE);
@@ -326,12 +326,14 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
         }
     };
 
+    const initialFetchDone = useRef(mediaItems.length > 0);
+
     useEffect(() => {
-        if (mediaItems.length === 0 && !isFetching) fetchOlderMessages();
-        // eslint-disable-next-line react-hooks/exhaustive-deps
+        if (initialFetchDone.current) return;
+        initialFetchDone.current = true;
+        fetchOlderMessages();
     }, []);
 
-    // Restore scroll position from cache after mount
     useEffect(() => {
         if (!saved?.scrollTop || !scrollRef.current) return;
         const el = scrollRef.current;
@@ -362,7 +364,7 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
         if (!size) return null;
 
         // Mirror native embed: VIDEO format for mp4/webm sources, IMAGE for static GIFs
-        const isVideoGif = !!item.url.match(/\.(mp4|webm|mov)($|\?)/i);
+        const isVideoGif = VIDEO_EXT_RE.test(item.url);
         const format = isVideoGif ? FavouriteItemFormat.VIDEO : FavouriteItemFormat.IMAGE;
         // Prefer CDN proxy URL for src (matches native embed EmbedAccessory behavior)
         const src = item.proxyUrl || item.url;
@@ -412,6 +414,7 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
                 <div className="vc-gallery-grid" style={{ "--vc-gallery-column-count": gridColumns } as any}>
                     {displayedMedia.map(item => {
                         const favoriteProps = getFavoriteButtonProps(item);
+                        const isVideoContent = item.isVideo || (item.isGif && VIDEO_EXT_RE.test(item.url));
 
                         return (
                         <div key={item.key} className="vc-gallery-card">
@@ -420,7 +423,7 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
                                     <FavoriteButton {...favoriteProps} className="vc-gallery-fav-btn" />
                                 </div>
                             ) : null}
-                            {item.isVideo || (item.isGif && item.url.match(/\.(mp4|webm|mov)($|\?)/i)) ? (
+                            {isVideoContent ? (
                                 <video
                                     src={getQualityUrl(item.url, gifQuality)}
                                     controls={!item.isGif}
