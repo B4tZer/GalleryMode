@@ -223,6 +223,7 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
     const [copyFeedback, setCopyFeedback] = useState<string | null>(null);
     const [columnSetting, setColumnSetting] = useState(settings.store.gridColumns ?? 4);
     const [containerWidth, setContainerWidth] = useState(0);
+    const [isIndexing, setIsIndexing] = useState(false);
 
     const gridRef = useRef<HTMLDivElement>(null);
 
@@ -247,6 +248,7 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
         scrollTop: 0,
         timestamp: 0,
     });
+    const indexingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
     useEffect(() => {
         stateRef.current = {
@@ -263,9 +265,9 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
     useEffect(() => {
         return () => {
             mountedRef.current = false;
-            // Disconnect the shared observer on unmount so stale img refs don't linger
             lazyObserver?.disconnect();
             lazyObserver = null;
+            if (indexingTimeoutRef.current) clearTimeout(indexingTimeoutRef.current);
         };
     }, []);
 
@@ -357,9 +359,15 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
             if (!mountedRef.current) return;
 
             if (response.status === 202) {
-                console.warn("[GalleryMode] Discord is indexing this chat.");
+                console.warn("[GalleryMode] Discord is indexing this chat. Retrying in 3s...");
+                setIsIndexing(true);
+                indexingTimeoutRef.current = setTimeout(() => {
+                    fetchOlderMessages(isResetting, targetFilter);
+                }, 3000);
                 return;
             }
+
+            setIsIndexing(false);
 
             if (!response.body?.messages?.length) {
                 setHasMore(false);
@@ -570,6 +578,21 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
                 </div>
             </div>
 
+            {isIndexing && (
+                <div style={{
+                    backgroundColor: "var(--background-message-automod)",
+                    color: "var(--text-normal)",
+                    padding: "8px 12px",
+                    borderRadius: "8px",
+                    marginBottom: "12px",
+                    fontSize: "14px",
+                    fontWeight: 500,
+                    borderLeft: "4px solid var(--info-warning-foreground)"
+                }}>
+                    Discord is currently indexing this channel's media. This may take a moment...
+                </div>
+            )}
+
             <div style={{ display: "flex", alignItems: "center", gap: "12px", marginBottom: "12px" }}>
                 <div style={{ color: "var(--text-muted)", fontSize: "13px" }}>
                     {displayedMedia.length} items loaded{isFetching ? " (loading...)" : ""}
@@ -624,6 +647,10 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
                                             getLazyObserver().observe(el);
                                         }}
                                         onLoad={e => rememberSize(item.key, e.currentTarget.naturalWidth, e.currentTarget.naturalHeight)}
+                                        onError={e => {
+                                            const card = e.currentTarget.closest('.vc-gallery-card') as HTMLElement;
+                                            if (card) card.style.display = 'none';
+                                        }}
                                     />
                                 </a>
                             )}
