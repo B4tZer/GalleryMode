@@ -478,9 +478,9 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
 }
 
 export default definePlugin({
-    name: "ChannelGalleryMode",
+    name: "GalleryView",
     description: "Infinitely scrolling media gallery with filtering and message context jumping.",
-    authors: [{ name: "Equicord User", id: 0n }],
+    authors: [{ name: "Sodroz", id: 145188106289545216n }],
     settings,
     contextMenus: {
         "channel-context": (children, { channel }) => {
