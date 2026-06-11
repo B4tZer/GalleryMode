@@ -4,10 +4,19 @@ import { findGroupChildrenByChildId } from "@api/ContextMenu";
 import { Menu, Text, RestAPI, Modal, openModal, useState, useEffect, useRef } from "@webpack/common";
 import { findByPropsLazy, findComponentByCodeLazy } from "@webpack";
 import ErrorBoundary from "@components/ErrorBoundary";
-import { FavouriteItemFormat } from "@equicordplugins/favouriteAnything/types";
 import "./style.css";
 
-import type { FavoriteButtonProps } from "@equicordplugins/favouriteAnything/types";
+// Inlined from @equicordplugins/favouriteAnything/types for Vencord compat
+enum FavouriteItemFormat { NONE = 0, IMAGE = 1, VIDEO = 2 }
+interface FavoriteButtonProps {
+    format: FavouriteItemFormat;
+    src: string;
+    url: string;
+    gifSrc?: string;
+    width: number;
+    height: number;
+    className?: string;
+}
 
 type MediaItem = {
     key: string;
