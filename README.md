@@ -7,7 +7,10 @@ Scroll through different media in a channel, with ability to favorite gifs.
 You need to have the specific chanel open for the jump feature to work!
 
 ## Install
+Official guide
+https://docs.vencord.dev/installing/custom-plugins/
 
+Quick guide:
 Direct your terminal to the userplugins folder src/userplugins
 ```shell
 git clone https://github.com/Sodroz/GalleryMode
