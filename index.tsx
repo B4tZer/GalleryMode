@@ -556,27 +556,17 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
     useEffect(() => {
         if (cachedState?.scrollTop == null || !scrollRef.current) return;
         const el = scrollRef.current;
-        let lastHeight = el.scrollHeight;
-        let stableCount = 0;
-        const ro = new ResizeObserver(() => {
-            if (scrollAppliedRef.current) return;
-            const currentHeight = el.scrollHeight;
-            if (currentHeight === lastHeight) {
-                stableCount++;
-                if (stableCount >= 2) {
-                    el.scrollTop = cachedState.scrollTop!;
-                    scrollAppliedRef.current = true;
-                    ro.disconnect();
-                }
-            } else {
-                lastHeight = currentHeight;
-                stableCount = 0;
-            }
+        let cancelled = false;
+        requestAnimationFrame(() => {
+            if (cancelled) return;
+            requestAnimationFrame(() => {
+                if (cancelled) return;
+                el.scrollTop = cachedState.scrollTop!;
+                scrollAppliedRef.current = true;
+            });
         });
-        ro.observe(el);
         return () => {
-            ro.disconnect();
-            scrollAppliedRef.current = false;
+            cancelled = true;
         };
     }, []);
 
