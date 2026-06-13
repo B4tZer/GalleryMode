@@ -26,4 +26,9 @@ All Done!
 
 ## To Do
 - Save position in viewer after jump - Done but needs minor tweaking
+
+## Known issues
+- screen turning black/ui breaking after opening repeated times
+- Some formats not showing up in the gallery
+
   
