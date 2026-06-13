@@ -28,7 +28,8 @@ All Done!
 - Save position in viewer after jump - Done but needs minor tweaking
 
 ## Known issues
-- screen turning black/ui breaking after opening repeated times
-- Some formats not showing up in the gallery
+- screen turning black/ui breaking after opening repeated times - Improved to where I'm unable to repeat the ui breaking. Fixed for now
+- Some formats not showing up in the gallery - partaly fixed but I'm sure there are still some edgecases and formats missing 
 
+## Please report bugs you find either in the Discord server post or Report the issue on github ❤️
   
