@@ -4,10 +4,7 @@
     gap: 16px;
 }
 
-/* Masonry: CSS columns for left-to-right flow isn't possible in pure CSS,
-   so we use a column-based approach. Items fill top-to-bottom per column.
-   aspect-ratio is set inline from CDN dimensions or load events so items
-   don't reflow after images load. */
+/* Masonry */
 .vc-gallery-masonry {
     columns: var(--vc-gallery-column-count, 4) auto;
     column-gap: 12px;
@@ -26,8 +23,7 @@
     contain-intrinsic-block-size: 200px;
 }
 
-/* Masonry cards: break-inside prevents splitting across columns.
-   aspect-ratio is overridden inline per-item. margin-bottom spaces rows. */
+/* Masonry card */
 .vc-gallery-card-masonry {
     break-inside: avoid;
     display: block;
