@@ -55,9 +55,16 @@ type MediaItem = {
 
 type FilterType = "all" | "images" | "gifs" | "videos";
 
+type SearchTag = "image" | "video" | "embed";
+
+type SubSearchState = {
+    tag: SearchTag;
+    offset: number;
+    hasMore: boolean;
+};
+
 const JumpAction = findByPropsLazy("jumpToMessage");
 const FavoriteButton = findComponentByCodeLazy<FavoriteButtonProps>("#{intl::GIF_TOOLTIP_ADD_TO_FAVORITES}");
-const PAGE_SIZE = 100;
 const VIDEO_EXT_RE = /\.(mp4|webm|mov)($|\?)/i;
 
 const Quality = {
@@ -110,8 +117,7 @@ const settings = definePluginSettings({
 
 type GalleryCache = {
     mediaItems: MediaItem[];
-    searchOffset: number;
-    hasMore: boolean;
+    subSearches: SubSearchState[];
     mediaSizes: Record<string, { width: number; height: number; }>;
     activeFilter: FilterType;
     scrollTop: number;
@@ -119,6 +125,16 @@ type GalleryCache = {
 };
 
 const channelCacheMap = new Map<string, GalleryCache>();
+
+function getSubSearches(filter: FilterType): SubSearchState[] {
+    const tags: SearchTag[] = filter === "all"
+        ? ["image", "video", "embed"]
+        : filter === "videos"
+            ? ["video"]
+            : ["image", "embed"];
+
+    return tags.map(tag => ({ tag, offset: 0, hasMore: true }));
+}
 
 function normalizeUrl(url: string) {
     return url.startsWith("//") ? `https:${url}` : url;
@@ -190,6 +206,54 @@ function getQualityUrl(url: string, qualityLevel: number) {
     return cleanUrl;
 }
 
+function extractMediaFromMessage(msg: any): MediaItem[] {
+    const items: MediaItem[] = [];
+    const seenKeys = new Set<string>();
+
+    const addMedia = (url: string, forceGif = false, sourceUrl?: string, proxyUrl?: string, w?: number, h?: number) => {
+        if (!url) return;
+        const normalizedUrl = normalizeUrl(url);
+        const key = `${msg.id}:${normalizedUrl}`;
+        if (seenKeys.has(key)) return;
+        seenKeys.add(key);
+        const normalizedSourceUrl = normalizeUrl(sourceUrl || url);
+        const normalizedProxyUrl = proxyUrl ? normalizeUrl(proxyUrl) : undefined;
+        const lowerUrl = url.toLowerCase();
+        const isVideoExt = VIDEO_EXT_RE.test(lowerUrl);
+        const isGifExt = forceGif || !!lowerUrl.match(/\.(gif)($|\?)/i) || url.includes("tenor.com");
+        const cdnDims = (!w || !h) ? parseCdnDimensions(normalizedProxyUrl ?? normalizedUrl) : null;
+        items.push({
+            key,
+            url: normalizedUrl,
+            proxyUrl: normalizedProxyUrl,
+            sourceUrl: normalizedSourceUrl,
+            isGif: isGifExt,
+            isVideo: isVideoExt && !isGifExt,
+            messageId: msg.id,
+            knownWidth: w || cdnDims?.width,
+            knownHeight: h || cdnDims?.height,
+        });
+    };
+
+    msg.attachments?.forEach((a: any) => {
+        if (a.content_type?.startsWith("image/") || a.content_type?.startsWith("video/")) {
+            addMedia(a.url || a.proxy_url, false, undefined, a.proxy_url, a.width, a.height);
+        }
+    });
+
+    msg.embeds?.forEach((e: any) => {
+        if (e.type === "image" && e.image?.url) {
+            addMedia(e.image.url, false, undefined, e.image.proxyURL, e.image.width, e.image.height);
+        } else if (e.type === "video" && e.video?.url) {
+            addMedia(e.video.url, e.provider?.name === "Tenor" || e.url?.includes("tenor"), e.url || e.video.url, e.video.proxyURL, e.video.width, e.video.height);
+        } else if (e.type === "gifv" && e.video?.url) {
+            addMedia(e.video.url, true, e.url || e.video.url, e.video.proxyURL, e.video.width, e.video.height);
+        }
+    });
+
+    return items;
+}
+
 function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }) {
     const gifQuality = settings.store.gifQuality ?? Quality.High;
     const cacheTtlMinutes = settings.store.cacheTtlMinutes ?? 30;
@@ -204,13 +268,13 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
     const [isFetching, setIsFetching] = useState(false);
     const [activeFilter, setActiveFilter] = useState<FilterType>(cachedState?.activeFilter ?? "all");
     const [mediaItems, setMediaItems] = useState<MediaItem[]>(cachedState?.mediaItems ?? []);
-    const [searchOffset, setSearchOffset] = useState(cachedState?.searchOffset ?? 0);
-    const [hasMore, setHasMore] = useState(cachedState?.hasMore ?? true);
+    const [subSearches, setSubSearches] = useState<SubSearchState[]>(cachedState?.subSearches ?? getSubSearches(cachedState?.activeFilter ?? "all"));
     const [mediaSizes, setMediaSizes] = useState<Record<string, { width: number; height: number; }>>(cachedState?.mediaSizes ?? {});
     const [layoutMode, setLayoutMode] = useState<"grid" | "masonry">((settings.store.layoutMode as "grid" | "masonry") ?? "grid");
     const [copyFeedback, setCopyFeedback] = useState<string | null>(null);
     const [columnSetting, setColumnSetting] = useState(settings.store.gridColumns ?? 4);
     const [isIndexing, setIsIndexing] = useState(false);
+    const [containerWidth, setContainerWidth] = useState(0);
 
     const gridRef = useRef<HTMLDivElement>(null);
     const scrollRef = useRef<HTMLDivElement>(null);
@@ -221,11 +285,11 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
     const copyTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const requestSeqRef = useRef(0);
     const observerRef = useRef<IntersectionObserver | null>(null);
+    const fetchFnRef = useRef<((isResetting?: boolean, targetFilter?: FilterType) => Promise<void>) | null>(null);
 
     const stateRef = useRef<GalleryCache>({
         mediaItems: [],
-        searchOffset: 0,
-        hasMore: true,
+        subSearches: getSubSearches("all"),
         mediaSizes: {},
         activeFilter: "all",
         scrollTop: 0,
@@ -234,8 +298,7 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
 
     stateRef.current = {
         mediaItems,
-        searchOffset,
-        hasMore,
+        subSearches,
         mediaSizes,
         activeFilter,
         scrollTop: scrollTopRef.current,
@@ -245,22 +308,35 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
     useEffect(() => {
         return () => {
             mountedRef.current = false;
-            observerRef.current?.disconnect();
-            observerRef.current = null;
+        };
+    }, []);
+
+    useEffect(() => {
+        return () => {
             if (indexingTimeoutRef.current) clearTimeout(indexingTimeoutRef.current);
             if (copyTimeoutRef.current) clearTimeout(copyTimeoutRef.current);
+        };
+    }, []);
 
-            if (cacheTtlMs > 0) {
-                channelCacheMap.delete(channel.id);
-                channelCacheMap.set(channel.id, {
-                    ...stateRef.current,
-                    scrollTop: scrollTopRef.current,
-                    timestamp: Date.now(),
-                });
-                if (channelCacheMap.size > 50) {
-                    const oldestKey = channelCacheMap.keys().next().value;
-                    if (oldestKey) channelCacheMap.delete(oldestKey);
-                }
+    useEffect(() => {
+        return () => {
+            observerRef.current?.disconnect();
+            observerRef.current = null;
+        };
+    }, []);
+
+    useEffect(() => {
+        if (cacheTtlMs <= 0) return;
+        return () => {
+            channelCacheMap.delete(channel.id);
+            channelCacheMap.set(channel.id, {
+                ...stateRef.current,
+                scrollTop: scrollTopRef.current,
+                timestamp: Date.now(),
+            });
+            if (channelCacheMap.size > 50) {
+                const oldestKey = channelCacheMap.keys().next().value;
+                if (oldestKey) channelCacheMap.delete(oldestKey);
             }
         };
     }, [cacheTtlMs, channel.id]);
@@ -271,7 +347,7 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
             for (const entry of entries) {
                 if (!entry.isIntersecting) continue;
                 const img = entry.target as HTMLImageElement;
-                const src = img.dataset.src;
+                const { src } = img.dataset;
                 if (src) {
                     img.src = src;
                     delete img.dataset.src;
@@ -284,6 +360,23 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
             observerRef.current = null;
         };
     }, []);
+
+    useEffect(() => {
+        if (!gridRef.current) return;
+        const ro = new ResizeObserver(entries => {
+            setContainerWidth(entries[0].contentRect.width);
+        });
+        ro.observe(gridRef.current);
+        return () => ro.disconnect();
+    }, []);
+
+    const effectiveColumns = useMemo(() => {
+        if (columnSetting > 0) return columnSetting;
+        if (!containerWidth) return 4;
+        return Math.max(2, Math.floor((containerWidth + 12) / (200 + 12)));
+    }, [columnSetting, containerWidth]);
+
+    const hasMore = subSearches.some(search => search.hasMore);
 
     const setFetching = (value: boolean) => {
         fetchingRef.current = value;
@@ -299,11 +392,10 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
         });
     };
 
-    const resetGalleryState = () => {
+    const resetGalleryState = (filter = activeFilter) => {
         setMediaItems([]);
         setMediaSizes({});
-        setSearchOffset(0);
-        setHasMore(true);
+        setSubSearches(getSubSearches(filter));
     };
 
     const jumpToMessage = (messageId: string, e: React.MouseEvent) => {
@@ -329,9 +421,8 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
     };
 
     const fetchOlderMessages = async (isResetting = false, targetFilter = activeFilter) => {
-        const currentOffset = isResetting ? 0 : searchOffset;
-        const currentHasMore = isResetting ? true : hasMore;
-        if (fetchingRef.current || !currentHasMore) return;
+        const currentSearches = isResetting ? getSubSearches(targetFilter) : subSearches;
+        if (fetchingRef.current || !currentSearches.some(search => search.hasMore)) return;
         setFetching(true);
         const requestSeq = ++requestSeqRef.current;
         if (indexingTimeoutRef.current) {
@@ -345,97 +436,61 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
                 ? `/guilds/${channel.guild_id}/messages/search`
                 : `/channels/${channel.id}/messages/search`;
 
-            let searchTag = "image";
-            if (targetFilter === "videos") searchTag = "video";
-            else if (targetFilter === "gifs") searchTag = "embed";
-            else if (targetFilter === "all") searchTag = "file";
+            const responses = await Promise.all(currentSearches.filter(search => search.hasMore).map(async search => {
+                const response = await RestAPI.get({
+                    url: searchUrl,
+                    query: {
+                        has: search.tag,
+                        offset: search.offset,
+                        ...(isGuild ? { channel_id: channel.id } : {}),
+                        ...((channel.nsfw || channel.isNSFW?.()) ? { include_nsfw: true } : {}),
+                    },
+                });
+                return { search, response };
+            }));
 
-            const queryParams: any = { has: searchTag, offset: currentOffset };
-            if (isGuild) queryParams.channel_id = channel.id;
-            if (channel.nsfw || channel.isNSFW?.()) queryParams.include_nsfw = true;
-
-            const response = await RestAPI.get({ url: searchUrl, query: queryParams });
             if (!mountedRef.current || requestSeq !== requestSeqRef.current) return;
 
-            if (response.status === 202) {
+            if (responses.some(({ response }) => response.status === 202)) {
                 setIsIndexing(true);
-                fetchingRef.current = false;
-                setIsFetching(false);
                 indexingTimeoutRef.current = setTimeout(() => {
-                    if (mountedRef.current) fetchOlderMessages(isResetting, targetFilter);
+                    if (mountedRef.current) fetchFnRef.current?.(isResetting, targetFilter);
                 }, 3000);
                 return;
             }
 
-            if (!mountedRef.current || requestSeq !== requestSeqRef.current) return;
             setIsIndexing(false);
 
-            if (!response.body?.messages?.length) {
-                setHasMore(false);
-                return;
+            const nextSearches = currentSearches.map(search => ({ ...search }));
+            const extractedMedia: MediaItem[] = [];
+
+            for (const { search, response } of responses) {
+                const next = nextSearches.find(s => s.tag === search.tag);
+                const foundMessages = response.body?.messages?.map((hitGroup: any[]) => hitGroup?.[0]).filter(Boolean) ?? [];
+                extractedMedia.push(...foundMessages.flatMap((msg: any) => extractMediaFromMessage(msg)));
+                if (!next) continue;
+                const fetchedCount = foundMessages.length;
+                next.offset += fetchedCount;
+                if (fetchedCount < 25) next.hasMore = false;
             }
 
-            const foundMessages = response.body.messages.map((hitGroup: any[]) => hitGroup?.[0]).filter(Boolean);
-            const extractedMedia: MediaItem[] = [];
-            const seenKeys = new Set<string>();
-
-            foundMessages.forEach((msg: any) => {
-                const addMedia = (url: string, forceGif = false, sourceUrl?: string, proxyUrl?: string, w?: number, h?: number) => {
-                    if (!url) return;
-                    const normalizedUrl = normalizeUrl(url);
-                    const key = `${msg.id}:${normalizedUrl}`;
-                    if (seenKeys.has(key)) return;
-                    seenKeys.add(key);
-                    const normalizedSourceUrl = normalizeUrl(sourceUrl || url);
-                    const normalizedProxyUrl = proxyUrl ? normalizeUrl(proxyUrl) : undefined;
-                    const lowerUrl = url.toLowerCase();
-                    const isVideoExt = VIDEO_EXT_RE.test(lowerUrl);
-                    const isGifExt = forceGif || !!lowerUrl.match(/\.(gif)($|\?)/i) || url.includes("tenor.com");
-                    const cdnDims = (!w || !h) ? parseCdnDimensions(normalizedProxyUrl ?? normalizedUrl) : null;
-                    extractedMedia.push({
-                        key,
-                        url: normalizedUrl,
-                        proxyUrl: normalizedProxyUrl,
-                        sourceUrl: normalizedSourceUrl,
-                        isGif: isGifExt,
-                        isVideo: isVideoExt && !isGifExt,
-                        messageId: msg.id,
-                        knownWidth: w || cdnDims?.width,
-                        knownHeight: h || cdnDims?.height,
-                    });
-                };
-
-                msg.attachments?.forEach((a: any) => {
-                    if (a.content_type?.startsWith("image/") || a.content_type?.startsWith("video/"))
-                        addMedia(a.url || a.proxy_url, false, undefined, a.proxy_url, a.width, a.height);
-                });
-
-                msg.embeds?.forEach((e: any) => {
-                    if (e.type === "image" && e.image?.url)
-                        addMedia(e.image.url, false, undefined, e.image.proxyURL, e.image.width, e.image.height);
-                    else if (e.type === "video" && e.video?.url) {
-                        addMedia(e.video.url, e.provider?.name === "Tenor" || e.url?.includes("tenor"), e.url || e.video.url, e.video.proxyURL, e.video.width, e.video.height);
-                    } else if (e.type === "gifv" && e.video?.url) {
-                        addMedia(e.video.url, true, e.url || e.video.url, e.video.proxyURL, e.video.width, e.video.height);
-                    }
-                });
-            });
-
             setMediaItems(prev => {
-                if (isResetting) return extractedMedia;
                 const seen = new Set(prev.map(item => item.key));
                 const newItems = extractedMedia.filter(item => !seen.has(item.key));
-                return [...prev, ...newItems];
+                return isResetting ? extractedMedia : [...prev, ...newItems];
             });
 
-            setSearchOffset(currentOffset + PAGE_SIZE);
-            if (typeof response.body.total_results === "number" && response.body.total_results <= currentOffset + PAGE_SIZE) setHasMore(false);
+            setSubSearches(nextSearches);
         } catch (error) {
             log.error("Search API failed", error);
         } finally {
             if (mountedRef.current) setFetching(false);
         }
     };
+
+    useEffect(() => {
+        fetchFnRef.current = fetchOlderMessages;
+    });
 
     const initialFetchDone = useRef(mediaItems.length > 0);
 
@@ -469,7 +524,8 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
         }
         channelCacheMap.delete(channel.id);
         setActiveFilter(type);
-        resetGalleryState();
+        setSubSearches(getSubSearches(type));
+        resetGalleryState(type);
         fetchOlderMessages(true, type);
     };
 
@@ -553,7 +609,6 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
                         onClick={() => {
                             settings.store.layoutMode = "masonry";
                             setLayoutMode("masonry");
-                            // Layout now persists between opens.
                         }}
                         className={`vc-gallery-filter-btn vc-gallery-layout-btn ${layoutMode === "masonry" ? "vc-gallery-filter-btn-active" : ""}`}
                         title="Masonry"
@@ -591,7 +646,7 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
                 <div
                     ref={gridRef}
                     className={layoutMode === "masonry" ? "vc-gallery-masonry" : "vc-gallery-grid"}
-                    style={columnSetting > 0 ? ({ "--vc-gallery-column-count": columnSetting, gridTemplateColumns: `repeat(${columnSetting}, minmax(200px, 1fr))` } as any) : undefined}
+                    style={({ "--vc-gallery-column-count": effectiveColumns, gridTemplateColumns: layoutMode === "grid" ? `repeat(${effectiveColumns}, minmax(200px, 1fr))` : undefined } as any)}
                 >
                     {displayedMedia.map(item => {
                         const favoriteProps = getFavoriteButtonProps(item);
