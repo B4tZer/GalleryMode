@@ -293,6 +293,7 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
     const observerRef = useRef<IntersectionObserver | null>(null);
     const fetchFnRef = useRef<((isResetting?: boolean, targetFilter?: FilterType) => Promise<void>) | null>(null);
     const subSearchesRef = useRef(subSearches);
+    const scrollAppliedRef = useRef(false);
 
     const stateRef = useRef<GalleryCache>({
         mediaItems: [],
@@ -555,16 +556,27 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
     useEffect(() => {
         if (cachedState?.scrollTop == null || !scrollRef.current) return;
         const el = scrollRef.current;
-        let raf1 = 0;
-        let raf2 = 0;
-        raf1 = requestAnimationFrame(() => {
-            raf2 = requestAnimationFrame(() => {
-                el.scrollTop = cachedState.scrollTop!;
-            });
+        let lastHeight = el.scrollHeight;
+        let stableCount = 0;
+        const ro = new ResizeObserver(() => {
+            if (scrollAppliedRef.current) return;
+            const currentHeight = el.scrollHeight;
+            if (currentHeight === lastHeight) {
+                stableCount++;
+                if (stableCount >= 2) {
+                    el.scrollTop = cachedState.scrollTop!;
+                    scrollAppliedRef.current = true;
+                    ro.disconnect();
+                }
+            } else {
+                lastHeight = currentHeight;
+                stableCount = 0;
+            }
         });
+        ro.observe(el);
         return () => {
-            cancelAnimationFrame(raf1);
-            cancelAnimationFrame(raf2);
+            ro.disconnect();
+            scrollAppliedRef.current = false;
         };
     }, []);
 
