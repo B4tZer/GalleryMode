@@ -28,7 +28,10 @@ All Done!
 - Save position in viewer after jump - Done but needs minor tweaking
 
 ## Known issues
-- screen turning black/ui breaking after opening repeated times - Improved to where I'm unable to repeat the ui breaking. Fixed for now
+- screen turning black/ui breaking - This is a limitation of chromium itself with how many videos it can decode at once, work around it by Keeping column counts reasonable (4-5) when browsing heavily animated or video-dense channels. or rip it and break it the choice is yours (ctrl + r) will fix it
+
+- Media jumping around in masonry(adaptive) view mode - work around is to just scroll like a normal person, this is a gallery not tiktok or use grid(square)view
+
 - Some formats not showing up in the gallery - partaly fixed but I'm sure there are still some edgecases and formats missing 
 
 ## Please report bugs you find either in the Discord server post or Report the issue on github ❤️
