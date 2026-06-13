@@ -81,6 +81,8 @@ const qualities = [
     { giphy: "100", tenor: "A2", video: "P4" },
 ];
 
+const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
+
 const mediaTenorRegex = /^https:\/\/(?:media\d?|c)\.tenor\.com(?:\/m)?\/(?<id>.+?)(?<quality>\w{2})\/(?<name>[^/]+)\.(?<ext>gif|webp|mp4|webm)$/i;
 const giphyLinkRegex = /^https:\/\/media\d?\.giphy\.com\/media\/.*?\/(?<code>.*?)\/giphy/i;
 
@@ -289,6 +291,7 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
     const requestSeqRef = useRef(0);
     const observerRef = useRef<IntersectionObserver | null>(null);
     const fetchFnRef = useRef<((isResetting?: boolean, targetFilter?: FilterType) => Promise<void>) | null>(null);
+    const subSearchesRef = useRef(subSearches);
 
     const stateRef = useRef<GalleryCache>({
         mediaItems: [],
@@ -299,14 +302,20 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
         timestamp: 0,
     });
 
-    stateRef.current = {
-        mediaItems,
-        subSearches,
-        mediaSizes,
-        activeFilter,
-        scrollTop: scrollTopRef.current,
-        timestamp: Date.now(),
-    };
+    useLayoutEffect(() => {
+        stateRef.current = {
+            mediaItems,
+            subSearches,
+            mediaSizes,
+            activeFilter,
+            scrollTop: scrollTopRef.current,
+            timestamp: Date.now(),
+        };
+    }, [mediaItems, subSearches, mediaSizes, activeFilter]);
+
+    useEffect(() => {
+        subSearchesRef.current = subSearches;
+    }, [subSearches]);
 
     useEffect(() => {
         return () => {
@@ -322,21 +331,16 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
     }, []);
 
     useEffect(() => {
-        return () => {
-            observerRef.current?.disconnect();
-            observerRef.current = null;
-        };
-    }, []);
-
-    useEffect(() => {
         if (cacheTtlMs <= 0) return;
         return () => {
-            channelCacheMap.delete(channel.id);
-            channelCacheMap.set(channel.id, {
-                ...stateRef.current,
-                scrollTop: scrollTopRef.current,
-                timestamp: Date.now(),
-            });
+            if (stateRef.current.mediaItems.length > 0) {
+                channelCacheMap.delete(channel.id);
+                channelCacheMap.set(channel.id, {
+                    ...stateRef.current,
+                    scrollTop: scrollTopRef.current,
+                    timestamp: Date.now(),
+                });
+            }
             if (channelCacheMap.size > 50) {
                 const oldestKey = channelCacheMap.keys().next().value;
                 if (oldestKey) channelCacheMap.delete(oldestKey);
@@ -386,6 +390,11 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
         setIsFetching(value);
     };
 
+    const setSearches = (next: SubSearchState[]) => {
+        subSearchesRef.current = next;
+        setSubSearches(next);
+    };
+
     const rememberSize = (key: string, width: number, height: number) => {
         if (!width || !height) return;
         setMediaSizes(prev => {
@@ -398,7 +407,7 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
     const resetGalleryState = (filter = activeFilter) => {
         setMediaItems([]);
         setMediaSizes({});
-        setSubSearches(getSubSearches(filter));
+        setSearches(getSubSearches(filter));
     };
 
     const jumpToMessage = (messageId: string, e: React.MouseEvent) => {
@@ -424,7 +433,7 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
     };
 
     const fetchOlderMessages = async (isResetting = false, targetFilter = activeFilter) => {
-        const currentSearches = isResetting ? getSubSearches(targetFilter) : subSearches;
+        const currentSearches = isResetting ? getSubSearches(targetFilter) : subSearchesRef.current;
         if (fetchingRef.current || !currentSearches.some(search => search.hasMore)) return;
         setFetching(true);
         const requestSeq = ++requestSeqRef.current;
@@ -439,43 +448,70 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
                 ? `/guilds/${channel.guild_id}/messages/search`
                 : `/channels/${channel.id}/messages/search`;
 
-            const responses = await Promise.all(currentSearches.filter(search => search.hasMore).map(async search => {
-                const response = await RestAPI.get({
-                    url: searchUrl,
-                    query: {
-                        has: search.tag,
-                        offset: search.offset,
-                        ...(isGuild ? { channel_id: channel.id } : {}),
-                        ...((channel.nsfw || channel.isNSFW?.()) ? { include_nsfw: true } : {}),
-                    },
-                });
-                return { search, response };
-            }));
-
-            if (!mountedRef.current || requestSeq !== requestSeqRef.current) return;
-
-            if (responses.some(({ response }) => response.status === 202)) {
-                setIsIndexing(true);
-                indexingTimeoutRef.current = setTimeout(() => {
-                    if (mountedRef.current) fetchFnRef.current?.(isResetting, targetFilter);
-                }, 3000);
-                return;
-            }
-
             setIsIndexing(false);
 
             const nextSearches = currentSearches.map(search => ({ ...search }));
             const extractedMedia: MediaItem[] = [];
 
-            for (const { search, response } of responses) {
-                const next = nextSearches.find(s => s.tag === search.tag);
-                const foundMessages = response.body?.messages?.map((hitGroup: any[]) => hitGroup?.[0]).filter(Boolean) ?? [];
-                extractedMedia.push(...foundMessages.flatMap((msg: any) => extractMediaFromMessage(msg)));
-                if (!next) continue;
-                const fetchedCount = foundMessages.length;
-                next.offset += fetchedCount;
-                if (fetchedCount < 25) next.hasMore = false;
+            for (const search of currentSearches.filter(s => s.hasMore)) {
+                let retries = 0;
+                let success = false;
+
+                while (retries < 3 && !success) {
+                    if (!mountedRef.current || requestSeq !== requestSeqRef.current) return;
+
+                    try {
+                        const response = await RestAPI.get({
+                            url: searchUrl,
+                            query: {
+                                has: search.tag,
+                                offset: search.offset,
+                                ...(isGuild ? { channel_id: channel.id } : {}),
+                                ...((channel.nsfw || channel.isNSFW?.()) ? { include_nsfw: true } : {}),
+                            },
+                        });
+
+                        if (!mountedRef.current || requestSeq !== requestSeqRef.current) return;
+
+                        if (response.status === 202) {
+                            setIsIndexing(true);
+                            indexingTimeoutRef.current = setTimeout(() => {
+                                if (mountedRef.current) fetchFnRef.current?.(isResetting, targetFilter);
+                            }, 3000);
+                            return;
+                        }
+
+                        const next = nextSearches.find(s => s.tag === search.tag);
+                        const foundMessages = response.body?.messages?.map((hitGroup: any[]) => hitGroup?.[0]).filter(Boolean) ?? [];
+                        extractedMedia.push(...foundMessages.flatMap((msg: any) => extractMediaFromMessage(msg)));
+
+                        if (next) {
+                            const fetchedCount = foundMessages.length;
+                            next.offset += fetchedCount;
+                            if (fetchedCount < 25) next.hasMore = false;
+                        }
+
+                        success = true;
+                    } catch (error: any) {
+                        if (error.status === 429) {
+                            const retryAfterSec = Number(error.body?.retry_after ?? 5);
+                            const waitSec = Number.isFinite(retryAfterSec) && retryAfterSec > 0 ? retryAfterSec : 5;
+                            showToast(`Rate limited. Waiting ${Math.ceil(waitSec)}s...`, Toasts.Type.WARNING);
+                            await sleep(waitSec * 1000);
+                            retries++;
+                            if (retries >= 3) {
+                                showToast(`Skipped loading ${search.tag}s after 3 timeouts. Try again later.`, Toasts.Type.FAILURE);
+                            }
+                            continue;
+                        }
+
+                        log.error(`Search API failed for tag: ${search.tag}`, error);
+                        break;
+                    }
+                }
             }
+
+            if (!mountedRef.current || requestSeq !== requestSeqRef.current) return;
 
             setMediaItems(prev => {
                 const seen = new Set(prev.map(item => item.key));
@@ -483,7 +519,7 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
                 return isResetting ? extractedMedia : [...prev, ...newItems];
             });
 
-            setSubSearches(nextSearches);
+            setSearches(nextSearches);
         } catch (error) {
             log.error("Search API failed", error);
         } finally {
