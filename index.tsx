@@ -196,6 +196,9 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
     const cacheTtlMs = cacheTtlMinutes > 0 ? cacheTtlMinutes * 60_000 : 0;
 
     const saved = cacheTtlMs > 0 ? channelCacheMap.get(channel.id) : null;
+    if (saved && Date.now() - saved.timestamp >= cacheTtlMs) {
+        channelCacheMap.delete(channel.id);
+    }
     const cachedState = saved && Date.now() - saved.timestamp < cacheTtlMs ? saved : null;
 
     const [isFetching, setIsFetching] = useState(false);
@@ -248,11 +251,16 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
             if (copyTimeoutRef.current) clearTimeout(copyTimeoutRef.current);
 
             if (cacheTtlMs > 0) {
+                channelCacheMap.delete(channel.id);
                 channelCacheMap.set(channel.id, {
                     ...stateRef.current,
                     scrollTop: scrollTopRef.current,
                     timestamp: Date.now(),
                 });
+                if (channelCacheMap.size > 50) {
+                    const oldestKey = channelCacheMap.keys().next().value;
+                    if (oldestKey) channelCacheMap.delete(oldestKey);
+                }
             }
         };
     }, [cacheTtlMs, channel.id]);
@@ -438,10 +446,10 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
     }, []);
 
     useEffect(() => {
-        if (saved?.scrollTop == null || !scrollRef.current) return;
+        if (cachedState?.scrollTop == null || !scrollRef.current) return;
         const el = scrollRef.current;
         const timer = setTimeout(() => {
-            el.scrollTop = saved.scrollTop!;
+            el.scrollTop = cachedState.scrollTop!;
         }, 50);
         return () => clearTimeout(timer);
     }, []);
@@ -534,12 +542,19 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
                     />
                     <span className="vc-gallery-col-label">{columnSetting === 0 ? "Auto" : columnSetting}</span>
                     <button
-                        onClick={() => setLayoutMode("grid")}
+                        onClick={() => {
+                            settings.store.layoutMode = "grid";
+                            setLayoutMode("grid");
+                        }}
                         className={`vc-gallery-filter-btn vc-gallery-layout-btn ${layoutMode === "grid" ? "vc-gallery-filter-btn-active" : ""}`}
                         title="Square grid"
                     >⊞</button>
                     <button
-                        onClick={() => setLayoutMode("masonry")}
+                        onClick={() => {
+                            settings.store.layoutMode = "masonry";
+                            setLayoutMode("masonry");
+                            // Layout now persists between opens.
+                        }}
                         className={`vc-gallery-filter-btn vc-gallery-layout-btn ${layoutMode === "masonry" ? "vc-gallery-filter-btn-active" : ""}`}
                         title="Masonry"
                     >⬚</button>
