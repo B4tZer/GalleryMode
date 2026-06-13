@@ -22,6 +22,7 @@ import {
     Text,
     Toasts,
     useEffect,
+    useLayoutEffect,
     useMemo,
     useRef,
     useState,
@@ -353,15 +354,23 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
         observerRef.current = new IntersectionObserver(entries => {
             for (const entry of entries) {
                 if (!entry.isIntersecting) continue;
-                const img = entry.target as HTMLImageElement;
-                const { src } = img.dataset;
+                const media = entry.target as HTMLImageElement | HTMLVideoElement;
+                const { src } = media.dataset;
                 if (src) {
-                    img.src = src;
-                    delete img.dataset.src;
+                    media.src = src;
+                    if (media.tagName === "VIDEO") {
+                        (media as HTMLVideoElement).load();
+                    }
+                    delete media.dataset.src;
+                    delete media.dataset.vcGalleryLazy;
                 }
-                observerRef.current?.unobserve(img);
+                observerRef.current?.unobserve(media);
             }
-        }, { rootMargin: "0px 0px 800px 0px" });
+        }, { root: scrollRef.current, rootMargin: "0px 0px 800px 0px" });
+
+        const pending = scrollRef.current?.querySelectorAll<HTMLElement>("[data-vc-gallery-lazy]");
+        pending?.forEach(media => observerRef.current?.observe(media));
+
         return () => {
             observerRef.current?.disconnect();
             observerRef.current = null;
@@ -371,7 +380,10 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
     useEffect(() => {
         if (!gridRef.current) return;
         const ro = new ResizeObserver(entries => {
-            setContainerWidth(entries[0].contentRect.width);
+            const width = entries[0].contentRect.width;
+            requestAnimationFrame(() => {
+                setContainerWidth(prev => prev === width ? prev : width);
+            });
         });
         ro.observe(gridRef.current);
         return () => ro.disconnect();
@@ -408,6 +420,7 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
         setMediaItems([]);
         setMediaSizes({});
         setSearches(getSubSearches(filter));
+        scrollTopRef.current = 0;
     };
 
     const jumpToMessage = (messageId: string, e: React.MouseEvent) => {
@@ -542,10 +555,17 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
     useEffect(() => {
         if (cachedState?.scrollTop == null || !scrollRef.current) return;
         const el = scrollRef.current;
-        const timer = setTimeout(() => {
-            el.scrollTop = cachedState.scrollTop!;
-        }, 50);
-        return () => clearTimeout(timer);
+        let raf1 = 0;
+        let raf2 = 0;
+        raf1 = requestAnimationFrame(() => {
+            raf2 = requestAnimationFrame(() => {
+                el.scrollTop = cachedState.scrollTop!;
+            });
+        });
+        return () => {
+            cancelAnimationFrame(raf1);
+            cancelAnimationFrame(raf2);
+        };
     }, []);
 
     const handleScroll = (e: any) => {
@@ -563,7 +583,6 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
         }
         channelCacheMap.delete(channel.id);
         setActiveFilter(type);
-        setSubSearches(getSubSearches(type));
         resetGalleryState(type);
         fetchOlderMessages(true, type);
     };
@@ -698,12 +717,21 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
                                 {favoriteProps ? <div className="vc-gallery-fav-btn-wrap"><FavoriteButton {...favoriteProps} className="vc-gallery-fav-btn" /></div> : null}
                                 {isVideoContent ? (
                                     <video
-                                        src={getQualityUrl(item.url, gifQuality)}
+                                        data-src={getQualityUrl(item.url, gifQuality)}
+                                        data-vc-gallery-lazy="1"
                                         controls={!item.isGif}
                                         autoPlay={item.isGif}
                                         muted
                                         loop
                                         className="vc-gallery-media"
+                                        ref={el => {
+                                            if (!el || el.src) return;
+                                            if (observerRef.current) {
+                                                observerRef.current.observe(el);
+                                            } else {
+                                                el.dataset.vcGalleryLazy = "1";
+                                            }
+                                        }}
                                         onLoadedMetadata={e => rememberSize(item.key, e.currentTarget.videoWidth, e.currentTarget.videoHeight)}
                                     />
                                 ) : (
@@ -714,7 +742,11 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
                                             alt=""
                                             ref={el => {
                                                 if (!el || el.src) return;
-                                                observerRef.current?.observe(el);
+                                                if (observerRef.current) {
+                                                    observerRef.current.observe(el);
+                                                } else {
+                                                    el.dataset.vcGalleryLazy = "1";
+                                                }
                                             }}
                                             onLoad={e => rememberSize(item.key, e.currentTarget.naturalWidth, e.currentTarget.naturalHeight)}
                                             onError={e => {
