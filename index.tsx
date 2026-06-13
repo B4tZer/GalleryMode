@@ -192,12 +192,13 @@ function getQualityUrl(url: string, qualityLevel: number) {
     const giphyMatch = cleanUrl.match(giphyLinkRegex);
     if (giphyMatch) {
         const { code } = giphyMatch.groups!;
+        if (VIDEO_EXT_RE.test(cleanUrl)) return cleanUrl;
         return `https://i.giphy.com/media/${code}/${q.giphy}.webp`;
     }
 
     try {
         const parsed = new URL(cleanUrl);
-        if (parsed.hostname === "cdn.discordapp.com" || parsed.hostname.endsWith("discordapp.net")) {
+        if (parsed.hostname === "cdn.discordapp.com" || parsed.hostname === "media.discordapp.net") {
             parsed.searchParams.set("format", "webp");
             parsed.searchParams.set("animated", "true");
             return parsed.toString();
@@ -210,6 +211,7 @@ function getQualityUrl(url: string, qualityLevel: number) {
 function extractMediaFromMessage(msg: any): MediaItem[] {
     const items: MediaItem[] = [];
     const seenKeys = new Set<string>();
+    const isGiphyEmbed = (embed: any) => embed?.url?.includes("giphy") || embed?.provider?.name === "Giphy";
 
     const addMedia = (url: string, forceGif = false, sourceUrl?: string, proxyUrl?: string, w?: number, h?: number) => {
         if (!url) return;
@@ -244,9 +246,9 @@ function extractMediaFromMessage(msg: any): MediaItem[] {
 
     msg.embeds?.forEach((e: any) => {
         if (e.type === "image" && e.image?.url) {
-            addMedia(e.image.url, false, undefined, e.image.proxyURL, e.image.width, e.image.height);
+            addMedia(e.image.url, isGiphyEmbed(e), undefined, e.image.proxyURL, e.image.width, e.image.height);
         } else if (e.type === "video" && e.video?.url) {
-            addMedia(e.video.url, e.provider?.name === "Tenor" || e.url?.includes("tenor"), e.url || e.video.url, e.video.proxyURL, e.video.width, e.video.height);
+            addMedia(e.video.url, e.provider?.name === "Tenor" || e.url?.includes("tenor") || isGiphyEmbed(e), e.url || e.video.url, e.video.proxyURL, e.video.width, e.video.height);
         } else if (e.type === "gifv" && e.video?.url) {
             addMedia(e.video.url, true, e.url || e.video.url, e.video.proxyURL, e.video.width, e.video.height);
         }
