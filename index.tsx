@@ -126,6 +126,7 @@ type GalleryCache = {
 
 const channelCacheMap = new Map<string, GalleryCache>();
 
+// fixed some media not showing up in some cases
 function getSubSearches(filter: FilterType): SubSearchState[] {
     const tags: SearchTag[] = filter === "all"
         ? ["image", "video", "embed"]
