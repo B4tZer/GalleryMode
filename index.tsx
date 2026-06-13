@@ -1,18 +1,41 @@
-import { definePluginSettings } from "@api/Settings";
-import definePlugin, { OptionType } from "@utils/types";
+/*
+ * Vencord, a Discord client mod
+ * Copyright (c) 2026 Vendicated and contributors
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ */
+
 import { findGroupChildrenByChildId } from "@api/ContextMenu";
-import { Menu, Text, RestAPI, Modal, openModal, useState, useEffect, useRef, useMemo } from "@webpack/common";
-import { findByPropsLazy, findComponentByCodeLazy } from "@webpack";
+import { definePluginSettings } from "@api/Settings";
 import ErrorBoundary from "@components/ErrorBoundary";
-import * as React from "react";
-import "./style.css";
+import { Logger } from "@utils/Logger";
+import { copyToClipboard } from "@utils/clipboard";
+import definePlugin, { OptionType } from "@utils/types";
+import { saveFile } from "@utils/web";
+import { findByPropsLazy, findComponentByCodeLazy } from "@webpack";
+import {
+    Menu,
+    Modal,
+    openModal,
+    React,
+    RestAPI,
+    showToast,
+    Text,
+    Toasts,
+    useEffect,
+    useMemo,
+    useRef,
+    useState,
+} from "@webpack/common";
+
+import style from "./style.css?managed";
+
+const log = new Logger("GalleryMode");
 
 enum FavouriteItemFormat { NONE = 0, IMAGE = 1, VIDEO = 2 }
 interface FavoriteButtonProps {
     format: FavouriteItemFormat;
     src: string;
     url: string;
-    gifSrc?: string;
     width: number;
     height: number;
     className?: string;
@@ -26,9 +49,6 @@ type MediaItem = {
     isGif: boolean;
     isVideo: boolean;
     messageId: string;
-    // Best-known dimensions at parse time. Populated from embed/attachment metadata
-    // first, then CDN URL query params as fallback. Used for aspect-ratio pre-layout
-    // in masonry so cards don't reflow after images load.
     knownWidth?: number;
     knownHeight?: number;
 };
@@ -48,10 +68,10 @@ const Quality = {
 } as const;
 
 const qualities = [
-    { giphy: "giphy", tenor: "Ax", video: "Po" }, // High ~ 480-native
-    { giphy: "480w", tenor: "A5", video: "P3" },   // Reasonable ~ 360
-    { giphy: "200", tenor: "A1", video: "P2" },    // Low ~ 200
-    { giphy: "100", tenor: "A2", video: "P4" },    // Horrible ~ 120
+    { giphy: "giphy", tenor: "Ax", video: "Po" },
+    { giphy: "480w", tenor: "A5", video: "P3" },
+    { giphy: "200", tenor: "A1", video: "P2" },
+    { giphy: "100", tenor: "A2", video: "P4" },
 ];
 
 const mediaTenorRegex = /^https:\/\/(?:media\d?|c)\.tenor\.com(?:\/m)?\/(?<id>.+?)(?<quality>\w{2})\/(?<name>[^/]+)\.(?<ext>gif|webp|mp4|webm)$/i;
@@ -98,71 +118,43 @@ type GalleryCache = {
     timestamp: number;
 };
 
-let channelCache: { channelId: string; state: GalleryCache; } | null = null;
+const channelCacheMap = new Map<string, GalleryCache>();
 
 function normalizeUrl(url: string) {
     return url.startsWith("//") ? `https:${url}` : url;
 }
 
-// Discord CDN URLs often embed width/height as query params — use these for masonry
-// pre-layout so we don't have to wait for images to load before placing them.
 function parseCdnDimensions(url: string): { width: number; height: number; } | null {
     try {
         const parsed = new URL(url);
         const w = parseInt(parsed.searchParams.get("width") ?? "", 10);
         const h = parseInt(parsed.searchParams.get("height") ?? "", 10);
         if (w > 0 && h > 0) return { width: w, height: h };
-    } catch { /* ignore */ }
+    } catch {}
     return null;
 }
 
 async function copyMediaToClipboard(url: string, isVideo: boolean): Promise<boolean> {
     if (isVideo) {
-        // Can't write video to clipboard — fall back to URL copy
-        await navigator.clipboard.writeText(url);
-        return false; // false = copied URL, not image
+        await copyToClipboard(url);
+        return false;
     }
     try {
         const res = await fetch(url);
         const blob = await res.blob();
         const item = new ClipboardItem({ [blob.type]: blob });
         await navigator.clipboard.write([item]);
-        return true; // true = copied image data
+        return true;
     } catch {
-        // Fallback to URL if blob copy fails (e.g. cross-origin restrictions)
-        await navigator.clipboard.writeText(url);
+        await copyToClipboard(url);
         return false;
     }
 }
 
-// Returns the best aspect ratio string we can determine without waiting for load.
-// Priority: known dims from parse time → mediaSizes from a previous load → 4:3 fallback.
-// The fallback causes one reflow per unknown item on first open, then mediaSizes takes over.
 function getAspectRatio(item: MediaItem, mediaSizes: Record<string, { width: number; height: number; }>): string {
     const w = item.knownWidth ?? mediaSizes[item.key]?.width;
     const h = item.knownHeight ?? mediaSizes[item.key]?.height;
-    return w && h ? `${w} / ${h}` : "4 / 3";
-}
-
-// Single observer instance reused across renders. rootMargin triggers image load
-// 800px before the image scrolls into view, hiding network latency behind scroll time.
-let lazyObserver: IntersectionObserver | null = null;
-function getLazyObserver(): IntersectionObserver {
-    if (!lazyObserver) {
-        lazyObserver = new IntersectionObserver(entries => {
-            for (const entry of entries) {
-                if (!entry.isIntersecting) continue;
-                const img = entry.target as HTMLImageElement;
-                const src = img.dataset.src;
-                if (src) {
-                    img.src = src;
-                    delete img.dataset.src;
-                }
-                lazyObserver!.unobserve(img);
-            }
-        }, { rootMargin: "0px 0px 800px 0px" });
-    }
-    return lazyObserver;
+    return w && h ? `${w} / ${h}` : "1 / 1";
 }
 
 function getGifFavoriteUrl(item: Pick<MediaItem, "url" | "sourceUrl">) {
@@ -193,52 +185,40 @@ function getQualityUrl(url: string, qualityLevel: number) {
             parsed.searchParams.set("animated", "true");
             return parsed.toString();
         }
-    } catch {
-    }
+    } catch {}
 
     return cleanUrl;
 }
 
 function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }) {
     const gifQuality = settings.store.gifQuality ?? Quality.High;
-
     const cacheTtlMinutes = settings.store.cacheTtlMinutes ?? 30;
     const cacheTtlMs = cacheTtlMinutes > 0 ? cacheTtlMinutes * 60_000 : 0;
 
-    const saved = cacheTtlMs > 0
-        && channelCache?.channelId === channel.id
-        && Date.now() - channelCache.state.timestamp < cacheTtlMs
-        ? channelCache.state
-        : null;
+    const saved = cacheTtlMs > 0 ? channelCacheMap.get(channel.id) : null;
+    const cachedState = saved && Date.now() - saved.timestamp < cacheTtlMs ? saved : null;
 
     const [isFetching, setIsFetching] = useState(false);
-    const [activeFilter, setActiveFilter] = useState<FilterType>(saved?.activeFilter ?? "all");
-    const [mediaItems, setMediaItems] = useState<MediaItem[]>(saved?.mediaItems ?? []);
-    const [searchOffset, setSearchOffset] = useState(saved?.searchOffset ?? 0);
-    const [hasMore, setHasMore] = useState(saved?.hasMore ?? true);
-    const [mediaSizes, setMediaSizes] = useState<Record<string, { width: number; height: number; }>>(saved?.mediaSizes ?? {});
-    const [layoutMode, setLayoutMode] = useState<"grid" | "masonry">(
-        (settings.store.layoutMode as "grid" | "masonry") ?? "grid"
-    );
+    const [activeFilter, setActiveFilter] = useState<FilterType>(cachedState?.activeFilter ?? "all");
+    const [mediaItems, setMediaItems] = useState<MediaItem[]>(cachedState?.mediaItems ?? []);
+    const [searchOffset, setSearchOffset] = useState(cachedState?.searchOffset ?? 0);
+    const [hasMore, setHasMore] = useState(cachedState?.hasMore ?? true);
+    const [mediaSizes, setMediaSizes] = useState<Record<string, { width: number; height: number; }>>(cachedState?.mediaSizes ?? {});
+    const [layoutMode, setLayoutMode] = useState<"grid" | "masonry">((settings.store.layoutMode as "grid" | "masonry") ?? "grid");
     const [copyFeedback, setCopyFeedback] = useState<string | null>(null);
     const [columnSetting, setColumnSetting] = useState(settings.store.gridColumns ?? 4);
-    const [containerWidth, setContainerWidth] = useState(0);
     const [isIndexing, setIsIndexing] = useState(false);
 
     const gridRef = useRef<HTMLDivElement>(null);
-
-    // 0 = adaptive: derive column count from container width.
-    // Uses (containerWidth + gap) / (minCardWidth + gap) so breakpoints are consistent.
-    const effectiveColumns = useMemo(() => {
-        if (columnSetting > 0) return columnSetting;
-        if (!containerWidth) return 4;
-        return Math.max(2, Math.floor((containerWidth + 12) / (200 + 12)));
-    }, [columnSetting, containerWidth]);
-
+    const scrollRef = useRef<HTMLDivElement>(null);
     const mountedRef = useRef(true);
     const fetchingRef = useRef(false);
-    const scrollRef = useRef<HTMLDivElement>(null);
     const scrollTopRef = useRef(0);
+    const indexingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const copyTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const requestSeqRef = useRef(0);
+    const observerRef = useRef<IntersectionObserver | null>(null);
+
     const stateRef = useRef<GalleryCache>({
         mediaItems: [],
         searchOffset: 0,
@@ -248,51 +228,53 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
         scrollTop: 0,
         timestamp: 0,
     });
-    const indexingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-    useEffect(() => {
-        stateRef.current = {
-            mediaItems,
-            searchOffset,
-            hasMore,
-            mediaSizes,
-            activeFilter,
-            scrollTop: scrollTopRef.current,
-            timestamp: Date.now(),
-        };
-    });
+    stateRef.current = {
+        mediaItems,
+        searchOffset,
+        hasMore,
+        mediaSizes,
+        activeFilter,
+        scrollTop: scrollTopRef.current,
+        timestamp: Date.now(),
+    };
 
     useEffect(() => {
         return () => {
             mountedRef.current = false;
-            lazyObserver?.disconnect();
-            lazyObserver = null;
+            observerRef.current?.disconnect();
+            observerRef.current = null;
             if (indexingTimeoutRef.current) clearTimeout(indexingTimeoutRef.current);
-        };
-    }, []);
+            if (copyTimeoutRef.current) clearTimeout(copyTimeoutRef.current);
 
-    useEffect(() => {
-        if (cacheTtlMs <= 0) return;
-
-        return () => {
-            channelCache = {
-                channelId: channel.id,
-                state: {
+            if (cacheTtlMs > 0) {
+                channelCacheMap.set(channel.id, {
                     ...stateRef.current,
                     scrollTop: scrollTopRef.current,
                     timestamp: Date.now(),
-                },
-            };
+                });
+            }
         };
-    }, [channel.id, cacheTtlMs]);
+    }, [cacheTtlMs, channel.id]);
 
     useEffect(() => {
-        if (!gridRef.current) return;
-        const ro = new ResizeObserver(entries => {
-            setContainerWidth(entries[0].contentRect.width);
-        });
-        ro.observe(gridRef.current);
-        return () => ro.disconnect();
+        if (observerRef.current) return;
+        observerRef.current = new IntersectionObserver(entries => {
+            for (const entry of entries) {
+                if (!entry.isIntersecting) continue;
+                const img = entry.target as HTMLImageElement;
+                const src = img.dataset.src;
+                if (src) {
+                    img.src = src;
+                    delete img.dataset.src;
+                }
+                observerRef.current?.unobserve(img);
+            }
+        }, { rootMargin: "0px 0px 800px 0px" });
+        return () => {
+            observerRef.current?.disconnect();
+            observerRef.current = null;
+        };
     }, []);
 
     const setFetching = (value: boolean) => {
@@ -302,7 +284,6 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
 
     const rememberSize = (key: string, width: number, height: number) => {
         if (!width || !height) return;
-
         setMediaSizes(prev => {
             const current = prev[key];
             if (current?.width === width && current?.height === height) return prev;
@@ -317,20 +298,26 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
         setHasMore(true);
     };
 
-    const jumpToMessage = (messageId: string, e: any) => {
+    const jumpToMessage = (messageId: string, e: React.MouseEvent) => {
         e.preventDefault();
         e.stopPropagation();
         if (!JumpAction?.jumpToMessage) {
-            console.error("[GalleryMode] jumpToMessage module not found");
+            log.error("jumpToMessage module not found");
+            showToast("Unable to jump to message", Toasts.Type.FAILURE);
             return;
         }
-        JumpAction.jumpToMessage({
-            channelId: channel.id,
-            messageId,
-            flash: true,
-            jumpType: "INSTANT"
-        });
-        modalProps.onClose();
+        try {
+            JumpAction.jumpToMessage({
+                channelId: channel.id,
+                messageId,
+                flash: true,
+                jumpType: "INSTANT",
+            });
+            modalProps.onClose();
+        } catch (error) {
+            log.error("jumpToMessage failed", error);
+            showToast("Failed to jump to message", Toasts.Type.FAILURE);
+        }
     };
 
     const fetchOlderMessages = async (isResetting = false, targetFilter = activeFilter) => {
@@ -338,6 +325,11 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
         const currentHasMore = isResetting ? true : hasMore;
         if (fetchingRef.current || !currentHasMore) return;
         setFetching(true);
+        const requestSeq = ++requestSeqRef.current;
+        if (indexingTimeoutRef.current) {
+            clearTimeout(indexingTimeoutRef.current);
+            indexingTimeoutRef.current = null;
+        }
 
         try {
             const isGuild = !!channel.guild_id;
@@ -355,18 +347,19 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
             if (channel.nsfw || channel.isNSFW?.()) queryParams.include_nsfw = true;
 
             const response = await RestAPI.get({ url: searchUrl, query: queryParams });
-
-            if (!mountedRef.current) return;
+            if (!mountedRef.current || requestSeq !== requestSeqRef.current) return;
 
             if (response.status === 202) {
-                console.warn("[GalleryMode] Discord is indexing this chat. Retrying in 3s...");
                 setIsIndexing(true);
+                fetchingRef.current = false;
+                setIsFetching(false);
                 indexingTimeoutRef.current = setTimeout(() => {
-                    fetchOlderMessages(isResetting, targetFilter);
+                    if (mountedRef.current) fetchOlderMessages(isResetting, targetFilter);
                 }, 3000);
                 return;
             }
 
+            if (!mountedRef.current || requestSeq !== requestSeqRef.current) return;
             setIsIndexing(false);
 
             if (!response.body?.messages?.length) {
@@ -374,7 +367,7 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
                 return;
             }
 
-            const foundMessages = response.body.messages.map((hitGroup: any[]) => hitGroup[0]);
+            const foundMessages = response.body.messages.map((hitGroup: any[]) => hitGroup?.[0]).filter(Boolean);
             const extractedMedia: MediaItem[] = [];
             const seenKeys = new Set<string>();
 
@@ -390,7 +383,6 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
                     const lowerUrl = url.toLowerCase();
                     const isVideoExt = VIDEO_EXT_RE.test(lowerUrl);
                     const isGifExt = forceGif || !!lowerUrl.match(/\.(gif)($|\?)/i) || url.includes("tenor.com");
-                    // Prefer explicit dims from embed/attachment metadata, then CDN URL params
                     const cdnDims = (!w || !h) ? parseCdnDimensions(normalizedProxyUrl ?? normalizedUrl) : null;
                     extractedMedia.push({
                         key,
@@ -415,8 +407,7 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
                         addMedia(e.image.url, false, undefined, e.image.proxyURL, e.image.width, e.image.height);
                     else if (e.type === "video" && e.video?.url) {
                         addMedia(e.video.url, e.provider?.name === "Tenor" || e.url?.includes("tenor"), e.url || e.video.url, e.video.proxyURL, e.video.width, e.video.height);
-                    }
-                    else if (e.type === "gifv" && e.video?.url) {
+                    } else if (e.type === "gifv" && e.video?.url) {
                         addMedia(e.video.url, true, e.url || e.video.url, e.video.proxyURL, e.video.width, e.video.height);
                     }
                 });
@@ -430,12 +421,9 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
             });
 
             setSearchOffset(currentOffset + PAGE_SIZE);
-
-            if (response.body.total_results <= currentOffset + PAGE_SIZE) {
-                setHasMore(false);
-            }
+            if (typeof response.body.total_results === "number" && response.body.total_results <= currentOffset + PAGE_SIZE) setHasMore(false);
         } catch (error) {
-            console.error("[GalleryMode] Search API failed:", error);
+            log.error("Search API failed", error);
         } finally {
             if (mountedRef.current) setFetching(false);
         }
@@ -450,7 +438,7 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
     }, []);
 
     useEffect(() => {
-        if (!saved?.scrollTop || !scrollRef.current) return;
+        if (saved?.scrollTop == null || !scrollRef.current) return;
         const el = scrollRef.current;
         const timer = setTimeout(() => {
             el.scrollTop = saved.scrollTop!;
@@ -466,7 +454,12 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
 
     const handleFilterChange = (type: FilterType) => {
         if (activeFilter === type) return;
-        channelCache = null;
+        requestSeqRef.current++;
+        if (indexingTimeoutRef.current) {
+            clearTimeout(indexingTimeoutRef.current);
+            indexingTimeoutRef.current = null;
+        }
+        channelCacheMap.delete(channel.id);
         setActiveFilter(type);
         resetGalleryState();
         fetchOlderMessages(true, type);
@@ -474,35 +467,16 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
 
     const getFavoriteButtonProps = (item: MediaItem) => {
         if (!item.isGif) return null;
-
         const size = mediaSizes[item.key];
         if (!size) return null;
-
-        // Mirror native embed: VIDEO format for mp4/webm sources, IMAGE for static GIFs
         const isVideoGif = VIDEO_EXT_RE.test(item.url);
-        const format = isVideoGif ? FavouriteItemFormat.VIDEO : FavouriteItemFormat.IMAGE;
-        // Prefer CDN proxy URL for src (matches native embed EmbedAccessory behavior)
-        const src = item.proxyUrl || item.url;
-
         return {
-            format,
-            src,
+            format: isVideoGif ? FavouriteItemFormat.VIDEO : FavouriteItemFormat.IMAGE,
+            src: item.proxyUrl || item.url,
             url: getGifFavoriteUrl(item),
             width: size.width,
-            height: size.height
+            height: size.height,
         } satisfies FavoriteButtonProps;
-    };
-
-    const FilterButton = ({ label, type }: { label: string; type: FilterType }) => {
-        const isActive = activeFilter === type;
-        return (
-            <button
-                onClick={() => handleFilterChange(type)}
-                className={`vc-gallery-filter-btn ${isActive ? "vc-gallery-filter-btn-active" : ""}`}
-            >
-                {label}
-            </button>
-        );
     };
 
     const displayedMedia = useMemo(() => mediaItems.filter(item => {
@@ -518,7 +492,8 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
         const url = item.proxyUrl || item.url;
         const copiedImage = await copyMediaToClipboard(url, item.isVideo);
         setCopyFeedback(copiedImage ? "Image copied!" : "URL copied!");
-        setTimeout(() => setCopyFeedback(null), 2000);
+        if (copyTimeoutRef.current) clearTimeout(copyTimeoutRef.current);
+        copyTimeoutRef.current = setTimeout(() => setCopyFeedback(null), 2000);
     };
 
     const handleDownload = async (item: MediaItem, e: React.MouseEvent) => {
@@ -528,15 +503,8 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
         try {
             const res = await fetch(url);
             const blob = await res.blob();
-            const objectUrl = URL.createObjectURL(blob);
-            const a = document.createElement("a");
-            a.href = objectUrl;
             const ext = blob.type.split("/")[1] || url.split(".").pop()?.split("?")[0] || "bin";
-            a.download = `${item.messageId}.${ext}`;
-            document.body.appendChild(a);
-            a.click();
-            document.body.removeChild(a);
-            URL.revokeObjectURL(objectUrl);
+            saveFile(new File([blob], `${item.messageId}.${ext}`, { type: blob.type }));
         } catch {
             window.open(url, "_blank");
         }
@@ -545,14 +513,16 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
     return (
         <Modal {...modalProps} size="dynamic" title={`Gallery: ${channel.name}`}>
             <div style={{ display: "flex", gap: "8px", marginBottom: "16px", flexWrap: "wrap", alignItems: "center" }}>
-                <FilterButton label="All Media" type="all" />
-                <FilterButton label="Images" type="images" />
-                <FilterButton label="GIFs" type="gifs" />
-                <FilterButton label="Videos" type="videos" />
+                <FilterButton label="All Media" type="all" activeFilter={activeFilter} onFilterChange={handleFilterChange} />
+                <FilterButton label="Images" type="images" activeFilter={activeFilter} onFilterChange={handleFilterChange} />
+                <FilterButton label="GIFs" type="gifs" activeFilter={activeFilter} onFilterChange={handleFilterChange} />
+                <FilterButton label="Videos" type="videos" activeFilter={activeFilter} onFilterChange={handleFilterChange} />
                 <div style={{ marginLeft: "auto", display: "flex", gap: "6px", alignItems: "center" }}>
                     <input
                         type="range"
-                        min={0} max={8} step={1}
+                        min={0}
+                        max={8}
+                        step={1}
                         value={columnSetting}
                         onChange={e => {
                             const val = Number(e.target.value);
@@ -562,9 +532,7 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
                         className="vc-gallery-col-slider"
                         title="Columns (0 = adaptive)"
                     />
-                    <span className="vc-gallery-col-label">
-                        {columnSetting === 0 ? "Auto" : columnSetting}
-                    </span>
+                    <span className="vc-gallery-col-label">{columnSetting === 0 ? "Auto" : columnSetting}</span>
                     <button
                         onClick={() => setLayoutMode("grid")}
                         className={`vc-gallery-filter-btn vc-gallery-layout-btn ${layoutMode === "grid" ? "vc-gallery-filter-btn-active" : ""}`}
@@ -587,7 +555,7 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
                     marginBottom: "12px",
                     fontSize: "14px",
                     fontWeight: 500,
-                    borderLeft: "4px solid var(--info-warning-foreground)"
+                    borderLeft: "4px solid var(--info-warning-foreground)",
                 }}>
                     Discord is currently indexing this channel's media. This may take a moment...
                 </div>
@@ -608,70 +576,51 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
                 <div
                     ref={gridRef}
                     className={layoutMode === "masonry" ? "vc-gallery-masonry" : "vc-gallery-grid"}
-                    style={{ "--vc-gallery-column-count": effectiveColumns } as any}
+                    style={columnSetting > 0 ? ({ "--vc-gallery-column-count": columnSetting, gridTemplateColumns: `repeat(${columnSetting}, minmax(200px, 1fr))` } as any) : undefined}
                 >
                     {displayedMedia.map(item => {
                         const favoriteProps = getFavoriteButtonProps(item);
                         const isVideoContent = item.isVideo || (item.isGif && VIDEO_EXT_RE.test(item.url));
                         const aspectRatio = getAspectRatio(item, mediaSizes);
-                        // Grid mode uses fixed 1/1, masonry uses natural aspect ratio
                         const cardStyle = layoutMode === "masonry" ? { aspectRatio } : {};
 
                         return (
-                        <div key={item.key} className={`vc-gallery-card ${layoutMode === "masonry" ? "vc-gallery-card-masonry" : ""}`} style={cardStyle}>
-                            {favoriteProps ? (
-                                <div className="vc-gallery-fav-btn-wrap">
-                                    <FavoriteButton {...favoriteProps} className="vc-gallery-fav-btn" />
-                                </div>
-                            ) : null}
-                            {isVideoContent ? (
-                                <video
-                                    ref={el => { if (el) el.muted = true; }}
-                                    src={getQualityUrl(item.url, gifQuality)}
-                                    controls={!item.isGif}
-                                    autoPlay={item.isGif}
-                                    muted
-                                    loop
-                                    className="vc-gallery-media"
-                                    onLoadedMetadata={e => rememberSize(item.key, e.currentTarget.videoWidth, e.currentTarget.videoHeight)}
-                                />
-                            ) : (
-                                <a href={item.url} target="_blank" rel="noreferrer" style={{ display: "block", width: "100%", height: "100%" }}>
-                                    <img
-                                        data-src={getQualityUrl(item.url, gifQuality)}
+                            <div key={item.key} className={`vc-gallery-card ${layoutMode === "masonry" ? "vc-gallery-card-masonry" : ""}`} style={cardStyle}>
+                                {favoriteProps ? <div className="vc-gallery-fav-btn-wrap"><FavoriteButton {...favoriteProps} className="vc-gallery-fav-btn" /></div> : null}
+                                {isVideoContent ? (
+                                    <video
+                                        src={getQualityUrl(item.url, gifQuality)}
+                                        controls={!item.isGif}
+                                        autoPlay={item.isGif}
+                                        muted
+                                        loop
                                         className="vc-gallery-media"
-                                        alt=""
-                                        ref={el => {
-                                            if (!el) return;
-                                            if (el.src) return; // already loaded
-                                            getLazyObserver().observe(el);
-                                        }}
-                                        onLoad={e => rememberSize(item.key, e.currentTarget.naturalWidth, e.currentTarget.naturalHeight)}
-                                        onError={e => {
-                                            const card = e.currentTarget.closest('.vc-gallery-card') as HTMLElement;
-                                            if (card) card.style.display = 'none';
-                                        }}
+                                        onLoadedMetadata={e => rememberSize(item.key, e.currentTarget.videoWidth, e.currentTarget.videoHeight)}
                                     />
-                                </a>
-                            )}
-                            <div className="vc-gallery-card-actions">
-                                <div
-                                    className="vc-gallery-action-btn"
-                                    title="Copy"
-                                    onClick={e => handleCopy(item, e)}
-                                >⎘</div>
-                                <div
-                                    className="vc-gallery-action-btn"
-                                    title="Download"
-                                    onClick={e => handleDownload(item, e)}
-                                >↓</div>
-                                <div
-                                    className="vc-gallery-action-btn"
-                                    title="Jump to message"
-                                    onClick={e => jumpToMessage(item.messageId, e)}
-                                >↗</div>
+                                ) : (
+                                    <a href={item.url} target="_blank" rel="noreferrer" style={{ display: "block", width: "100%", height: "100%" }}>
+                                        <img
+                                            data-src={getQualityUrl(item.url, gifQuality)}
+                                            className="vc-gallery-media"
+                                            alt=""
+                                            ref={el => {
+                                                if (!el || el.src) return;
+                                                observerRef.current?.observe(el);
+                                            }}
+                                            onLoad={e => rememberSize(item.key, e.currentTarget.naturalWidth, e.currentTarget.naturalHeight)}
+                                            onError={e => {
+                                                const card = e.currentTarget.closest(".vc-gallery-card") as HTMLElement;
+                                                if (card) card.style.display = "none";
+                                            }}
+                                        />
+                                    </a>
+                                )}
+                                <div className="vc-gallery-card-actions">
+                                    <div className="vc-gallery-action-btn" title="Copy" onClick={e => handleCopy(item, e)}>⎘</div>
+                                    <div className="vc-gallery-action-btn" title="Download" onClick={e => handleDownload(item, e)}>↓</div>
+                                    <div className="vc-gallery-action-btn" title="Jump to message" onClick={e => jumpToMessage(item.messageId, e)}>↗</div>
+                                </div>
                             </div>
-                        </div>
                         );
                     })}
                 </div>
@@ -682,10 +631,14 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
                             onClick={() => fetchOlderMessages()}
                             disabled={isFetching}
                             style={{
-                                padding: "12px 24px", borderRadius: "8px", border: "none",
+                                padding: "12px 24px",
+                                borderRadius: "8px",
+                                border: "none",
                                 cursor: isFetching ? "not-allowed" : "pointer",
                                 backgroundColor: isFetching ? "var(--background-modifier-active)" : "var(--brand-experiment)",
-                                color: "white", fontWeight: "bold", fontSize: "16px"
+                                color: "white",
+                                fontWeight: "bold",
+                                fontSize: "16px",
                             }}
                         >
                             {isFetching ? "Loading..." : "Load Older Messages"}
@@ -701,9 +654,17 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
     );
 }
 
+const FilterButton = ({ label, type, activeFilter, onFilterChange }: { label: string; type: FilterType; activeFilter: FilterType; onFilterChange: (type: FilterType) => void }) => {
+    const isActive = activeFilter === type;
+    return <button onClick={() => onFilterChange(type)} className={`vc-gallery-filter-btn ${isActive ? "vc-gallery-filter-btn-active" : ""}`}>{label}</button>;
+};
+
 export default definePlugin({
-    name: "GalleryView",
+    name: "GalleryMode",
+    managedStyle: style,
     description: "Infinitely scrolling media gallery with filtering and message context jumping.",
+    tags: ["Media", "Utility"],
+    searchTerms: ["gallery", "media", "images", "videos", "gif"],
     authors: [{ name: "Sodroz", id: 145188106289545216n }],
     settings,
     contextMenus: {
@@ -720,6 +681,6 @@ export default definePlugin({
                     ))}
                 />
             );
-        }
-    }
+        },
+    },
 });
