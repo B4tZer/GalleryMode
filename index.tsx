@@ -495,14 +495,16 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
                             return;
                         }
 
+                        const body = response.body;
                         const next = nextSearches.find(s => s.tag === search.tag);
-                        const foundMessages = response.body?.messages?.map((hitGroup: any[]) => hitGroup?.[0]).filter(Boolean) ?? [];
+                        const foundMessages = body?.messages?.map((hitGroup: any[]) => hitGroup?.[0]).filter(Boolean) ?? [];
+                        const totalResults = body?.total_results ?? 0;
                         extractedMedia.push(...foundMessages.flatMap((msg: any) => extractMediaFromMessage(msg)));
 
                         if (next) {
                             const fetchedCount = foundMessages.length;
                             next.offset += fetchedCount;
-                            if (fetchedCount < 25) next.hasMore = false;
+                            next.hasMore = fetchedCount > 0 && next.offset < totalResults;
                         }
 
                         success = true;
@@ -510,7 +512,7 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
                         if (error.status === 429) {
                             const retryAfterSec = Number(error.body?.retry_after ?? 5);
                             const waitSec = Number.isFinite(retryAfterSec) && retryAfterSec > 0 ? retryAfterSec : 5;
-                            showToast(`Rate limited. Waiting ${Math.ceil(waitSec)}s...`, Toasts.Type.WARNING);
+                            showToast(`Rate limited. Waiting ${Math.ceil(waitSec)}s...`, Toasts.Type.MESSAGE);
                             await sleep(waitSec * 1000);
                             retries++;
                             if (retries >= 3) {
