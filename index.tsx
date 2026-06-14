@@ -29,9 +29,6 @@ import {
 } from "@webpack/common";
 
 import style from "./style.css?managed";
-import { saveVaultItem } from "./mediavault/db";
-import { makeVaultItemId } from "./mediavault/hydrate";
-import type { VaultItem } from "./mediavault/types";
 
 const log = new Logger("GalleryMode");
 
@@ -132,6 +129,7 @@ type GalleryCache = {
 
 const channelCacheMap = new Map<string, GalleryCache>();
 
+// fixed some media not showing up in some cases
 function getSubSearches(filter: FilterType): SubSearchState[] {
     const tags: SearchTag[] = filter === "all"
         ? ["image", "video", "embed"]
@@ -181,18 +179,6 @@ function getAspectRatio(item: MediaItem, mediaSizes: Record<string, { width: num
 
 function getGifFavoriteUrl(item: Pick<MediaItem, "url" | "sourceUrl">) {
     return normalizeUrl(item.sourceUrl || item.url);
-}
-
-function toVaultItem(channelId: string, item: MediaItem, width: number, height: number): VaultItem {
-    return {
-        id: makeVaultItemId(channelId, item.messageId, item.key),
-        channelId,
-        messageId: item.messageId,
-        width,
-        height,
-        type: item.isVideo ? "video/mp4" : "image/*",
-        savedAt: Date.now(),
-    };
 }
 
 function getQualityUrl(url: string, qualityLevel: number) {
@@ -274,11 +260,6 @@ function extractMediaFromMessage(msg: any): MediaItem[] {
     return items;
 }
 
-function FilterButton({ label, type, activeFilter, onFilterChange }: { label: string; type: FilterType; activeFilter: FilterType; onFilterChange: (type: FilterType) => void }) {
-    const isActive = activeFilter === type;
-    return <button onClick={() => onFilterChange(type)} className={`vc-gallery-filter-btn ${isActive ? "vc-gallery-filter-btn-active" : ""}`}>{label}</button>;
-}
-
 function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }) {
     const gifQuality = settings.store.gifQuality ?? Quality.High;
     const cacheTtlMinutes = settings.store.cacheTtlMinutes ?? 30;
@@ -353,7 +334,20 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
 
     useEffect(() => {
         if (cacheTtlMs <= 0) return;
-        return () => {};
+        return () => {
+            if (stateRef.current.mediaItems.length > 0) {
+                channelCacheMap.delete(channel.id);
+                channelCacheMap.set(channel.id, {
+                    ...stateRef.current,
+                    scrollTop: scrollTopRef.current,
+                    timestamp: Date.now(),
+                });
+            }
+            if (channelCacheMap.size > 50) {
+                const oldestKey = channelCacheMap.keys().next().value;
+                if (oldestKey) channelCacheMap.delete(oldestKey);
+            }
+        };
     }, [cacheTtlMs, channel.id]);
 
     useEffect(() => {
@@ -501,15 +495,14 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
                             return;
                         }
 
-                        const body = response.body;
-                        const messages = body?.messages?.map((hitGroup: any[]) => hitGroup?.[0]).filter(Boolean) ?? [];
-                        const totalResults = Number(body?.total_results ?? 0);
                         const next = nextSearches.find(s => s.tag === search.tag);
-                        extractedMedia.push(...messages.flatMap((msg: any) => extractMediaFromMessage(msg)));
+                        const foundMessages = response.body?.messages?.map((hitGroup: any[]) => hitGroup?.[0]).filter(Boolean) ?? [];
+                        extractedMedia.push(...foundMessages.flatMap((msg: any) => extractMediaFromMessage(msg)));
 
                         if (next) {
-                            next.offset += messages.length;
-                            next.hasMore = messages.length > 0 && next.offset < totalResults;
+                            const fetchedCount = foundMessages.length;
+                            next.offset += fetchedCount;
+                            if (fetchedCount < 25) next.hasMore = false;
                         }
 
                         success = true;
@@ -641,20 +634,6 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
         }
     };
 
-    const handleSaveToVault = async (item: MediaItem, e: React.MouseEvent) => {
-        e.preventDefault();
-        e.stopPropagation();
-        const width = item.knownWidth ?? mediaSizes[item.key]?.width ?? 1;
-        const height = item.knownHeight ?? mediaSizes[item.key]?.height ?? 1;
-        try {
-            await saveVaultItem(toVaultItem(channel.id, item, width, height));
-            showToast("Saved to Vault", Toasts.Type.SUCCESS);
-        } catch (error) {
-            log.error("Failed to save vault item", error);
-            showToast("Failed to save to Vault", Toasts.Type.FAILURE);
-        }
-    };
-
     return (
         <Modal {...modalProps} size="dynamic" title={`Gallery: ${channel.name}`}>
             <div style={{ display: "flex", gap: "8px", marginBottom: "16px", flexWrap: "wrap", alignItems: "center" }}>
@@ -780,7 +759,6 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
                                     </a>
                                 )}
                                 <div className="vc-gallery-card-actions">
-                                    <div className="vc-gallery-action-btn" title="Save to Vault" onClick={e => handleSaveToVault(item, e)}>＋</div>
                                     <div className="vc-gallery-action-btn" title="Copy" onClick={e => handleCopy(item, e)}>⎘</div>
                                     <div className="vc-gallery-action-btn" title="Download" onClick={e => handleDownload(item, e)}>↓</div>
                                     <div className="vc-gallery-action-btn" title="Jump to message" onClick={e => jumpToMessage(item.messageId, e)}>↗</div>
@@ -819,6 +797,11 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
     );
 }
 
+const FilterButton = ({ label, type, activeFilter, onFilterChange }: { label: string; type: FilterType; activeFilter: FilterType; onFilterChange: (type: FilterType) => void }) => {
+    const isActive = activeFilter === type;
+    return <button onClick={() => onFilterChange(type)} className={`vc-gallery-filter-btn ${isActive ? "vc-gallery-filter-btn-active" : ""}`}>{label}</button>;
+};
+
 export default definePlugin({
     name: "GalleryMode",
     managedStyle: style,
@@ -839,21 +822,7 @@ export default definePlugin({
                             <GalleryModal modalProps={props} channel={channel} />
                         </ErrorBoundary>
                     ))}
-                />,
-                <Menu.MenuItem
-                    id="vc-gallery-vault"
-                    label="Open Vault"
-                    action={() => openModal(props => {
-                        const LazyVault = React.lazy(async () => ({ default: (await import("./mediavault/MediaSuite")).default }));
-                        return (
-                            <ErrorBoundary>
-                                <React.Suspense fallback={<Text>Loading...</Text>}>
-                                    <LazyVault modalProps={props} channel={channel} />
-                                </React.Suspense>
-                            </ErrorBoundary>
-                        );
-                    })}
-                />,
+                />
             );
         },
     },
