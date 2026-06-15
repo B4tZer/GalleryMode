@@ -367,7 +367,7 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
                 }
                 observerRef.current?.unobserve(media);
             }
-        }, { root: scrollRef.current, rootMargin: "0px 0px 800px 0px" });
+        }, { root: scrollRef.current, rootMargin: "0px 0px 1500px 0px" });
 
         const pending = scrollRef.current?.querySelectorAll<HTMLElement>("[data-vc-gallery-lazy]");
         pending?.forEach(media => observerRef.current?.observe(media));
@@ -575,7 +575,7 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
     const handleScroll = (e: any) => {
         const { scrollTop, scrollHeight, clientHeight } = e.target;
         scrollTopRef.current = scrollTop;
-        if (scrollHeight - scrollTop <= clientHeight + 800) fetchOlderMessages();
+        if (scrollHeight - scrollTop <= clientHeight + 1500) fetchOlderMessages();
     };
 
     const handleFilterChange = (type: FilterType) => {
