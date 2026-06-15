@@ -106,7 +106,7 @@ const settings = definePluginSettings({
     cacheTtlMinutes: {
         type: OptionType.NUMBER,
         description: "Minutes to remember gallery position after closing (0 = disabled)",
-        default: 30,
+        default: 5,
     },
     layoutMode: {
         type: OptionType.SELECT,
