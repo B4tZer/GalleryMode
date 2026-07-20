@@ -4,10 +4,19 @@
     gap: 16px;
 }
 
-/* Masonry */
+/* Masonry: JS-distributed columns (items assigned to a column once, never reflowed) */
 .vc-gallery-masonry {
-    columns: var(--vc-gallery-column-count, 4) auto;
-    column-gap: 12px;
+    display: flex;
+    gap: 12px;
+    align-items: flex-start;
+}
+
+.vc-gallery-masonry-col {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    flex: 1 1 0;
+    min-width: 0;
 }
 
 .vc-gallery-card {
@@ -23,12 +32,11 @@
     contain-intrinsic-block-size: 200px;
 }
 
-/* Masonry card */
+/* Masonry card: height comes from the inline per-item aspect-ratio, not the 1/1 default.
+   Column gap is handled by the column flex container, so no per-card margin. */
 .vc-gallery-card-masonry {
-    break-inside: avoid;
     display: block;
     aspect-ratio: unset;
-    margin-bottom: 12px;
 }
 
 .vc-gallery-card:hover {

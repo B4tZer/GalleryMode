@@ -290,7 +290,8 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
     const indexingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const copyTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const requestSeqRef = useRef(0);
-    const observerRef = useRef<IntersectionObserver | null>(null);
+    const loadObserverRef = useRef<IntersectionObserver | null>(null);
+    const releaseObserverRef = useRef<IntersectionObserver | null>(null);
     const fetchFnRef = useRef<((isResetting?: boolean, targetFilter?: FilterType) => Promise<void>) | null>(null);
     const subSearchesRef = useRef(subSearches);
     const scrollAppliedRef = useRef(false);
@@ -351,30 +352,48 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
     }, [cacheTtlMs, channel.id]);
 
     useEffect(() => {
-        if (observerRef.current) return;
-        observerRef.current = new IntersectionObserver(entries => {
+        if (loadObserverRef.current) return;
+
+        // Near margin: hydrate media approaching the viewport.
+        loadObserverRef.current = new IntersectionObserver(entries => {
             for (const entry of entries) {
                 if (!entry.isIntersecting) continue;
                 const media = entry.target as HTMLImageElement | HTMLVideoElement;
                 const { src } = media.dataset;
-                if (src) {
+                if (src && media.dataset.vcGalleryLoaded !== "1") {
                     media.src = src;
-                    if (media.tagName === "VIDEO") {
-                        (media as HTMLVideoElement).load();
-                    }
-                    delete media.dataset.src;
-                    delete media.dataset.vcGalleryLazy;
+                    if (media.tagName === "VIDEO") (media as HTMLVideoElement).load();
+                    media.dataset.vcGalleryLoaded = "1";
                 }
-                observerRef.current?.unobserve(media);
+                if (media.tagName !== "VIDEO") loadObserverRef.current?.unobserve(media);
             }
-        }, { root: scrollRef.current, rootMargin: "0px 0px 1500px 0px" });
+        }, { root: scrollRef.current, rootMargin: "1200px 0px 1200px 0px" });
+
+        // Far margin: release offscreen videos. The gap between the two margins is
+        // hysteresis so boundary scrolling doesn't thrash load/release.
+        releaseObserverRef.current = new IntersectionObserver(entries => {
+            for (const entry of entries) {
+                if (entry.isIntersecting) continue;
+                const media = entry.target as HTMLVideoElement;
+                if (media.tagName !== "VIDEO" || media.dataset.vcGalleryLoaded !== "1") continue;
+                media.pause();
+                media.removeAttribute("src");
+                media.load(); // frees the decoder / buffered frames
+                media.dataset.vcGalleryLoaded = "0";
+            }
+        }, { root: scrollRef.current, rootMargin: "3000px 0px 3000px 0px" });
 
         const pending = scrollRef.current?.querySelectorAll<HTMLElement>("[data-vc-gallery-lazy]");
-        pending?.forEach(media => observerRef.current?.observe(media));
+        pending?.forEach(media => {
+            loadObserverRef.current?.observe(media);
+            if (media.tagName === "VIDEO") releaseObserverRef.current?.observe(media);
+        });
 
         return () => {
-            observerRef.current?.disconnect();
-            observerRef.current = null;
+            loadObserverRef.current?.disconnect();
+            loadObserverRef.current = null;
+            releaseObserverRef.current?.disconnect();
+            releaseObserverRef.current = null;
         };
     }, []);
 
@@ -397,6 +416,18 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
     }, [columnSetting, containerWidth]);
 
     const hasMore = subSearches.some(search => search.hasMore);
+
+    // Videos are watched by both observers (load near / release far); images only load.
+    const registerMedia = (el: HTMLImageElement | HTMLVideoElement | null) => {
+        if (!el) return;
+        if (loadObserverRef.current) {
+            loadObserverRef.current.observe(el);
+            if (el.tagName === "VIDEO") releaseObserverRef.current?.observe(el);
+        } else {
+            // Observers not ready yet; the effect's querySelectorAll seed picks these up.
+            el.dataset.vcGalleryLazy = "1";
+        }
+    };
 
     const setFetching = (value: boolean) => {
         fetchingRef.current = value;
@@ -575,7 +606,7 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
     const handleScroll = (e: any) => {
         const { scrollTop, scrollHeight, clientHeight } = e.target;
         scrollTopRef.current = scrollTop;
-        if (scrollHeight - scrollTop <= clientHeight + 1500) fetchOlderMessages();
+        if (scrollHeight - scrollTop <= clientHeight + 1200) fetchOlderMessages();
     };
 
     const handleFilterChange = (type: FilterType) => {
@@ -593,15 +624,19 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
 
     const getFavoriteButtonProps = (item: MediaItem) => {
         if (!item.isGif) return null;
-        const size = mediaSizes[item.key];
-        if (!size) return null;
+        // Prefer a measured size, but fall back to known CDN/embed dimensions so the
+        // favourite button still appears for videos that were released before measuring.
+        const measured = mediaSizes[item.key];
+        const width = measured?.width ?? item.knownWidth;
+        const height = measured?.height ?? item.knownHeight;
+        if (!width || !height) return null;
         const isVideoGif = VIDEO_EXT_RE.test(item.url);
         return {
             format: isVideoGif ? FavouriteItemFormat.VIDEO : FavouriteItemFormat.IMAGE,
             src: item.proxyUrl || item.url,
             url: getGifFavoriteUrl(item),
-            width: size.width,
-            height: size.height,
+            width,
+            height,
         } satisfies FavoriteButtonProps;
     };
 
@@ -611,6 +646,29 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
         if (activeFilter === "images") return !item.isVideo && !item.isGif;
         return true;
     }), [mediaItems, activeFilter]);
+
+    // Distribute items across columns by greedily filling the shortest one, using
+    // aspect-ratio to estimate each item's height. mediaSizes is left out of the deps
+    // so a late image load doesn't re-run this and reshuffle the columns.
+    const masonryColumns = useMemo(() => {
+        const cols: MediaItem[][] = Array.from({ length: effectiveColumns }, () => []);
+        if (layoutMode !== "masonry") return cols;
+        const heights = new Array(effectiveColumns).fill(0);
+        const estimateHeight = (item: MediaItem) => {
+            const w = item.knownWidth ?? mediaSizes[item.key]?.width;
+            const h = item.knownHeight ?? mediaSizes[item.key]?.height;
+            return w && h ? h / w : 1; // height per unit column width; 1 = square fallback
+        };
+        for (const item of displayedMedia) {
+            let shortest = 0;
+            for (let i = 1; i < effectiveColumns; i++) {
+                if (heights[i] < heights[shortest]) shortest = i;
+            }
+            cols[shortest].push(item);
+            heights[shortest] += estimateHeight(item);
+        }
+        return cols;
+    }, [displayedMedia, effectiveColumns, layoutMode]);
 
     const handleCopy = async (item: MediaItem, e: React.MouseEvent) => {
         e.preventDefault();
@@ -634,6 +692,52 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
         } catch {
             window.open(url, "_blank");
         }
+    };
+
+    const renderCard = (item: MediaItem) => {
+        const favoriteProps = getFavoriteButtonProps(item);
+        const isVideoContent = item.isVideo || (item.isGif && VIDEO_EXT_RE.test(item.url));
+        const aspectRatio = getAspectRatio(item, mediaSizes);
+        const cardStyle = layoutMode === "masonry" ? { aspectRatio } : {};
+
+        return (
+            <div key={item.key} className={`vc-gallery-card ${layoutMode === "masonry" ? "vc-gallery-card-masonry" : ""}`} style={cardStyle}>
+                {favoriteProps ? <div className="vc-gallery-fav-btn-wrap"><FavoriteButton {...favoriteProps} className="vc-gallery-fav-btn" /></div> : null}
+                {isVideoContent ? (
+                    <video
+                        data-src={getQualityUrl(item.url, gifQuality)}
+                        data-vc-gallery-lazy="1"
+                        controls={!item.isGif}
+                        autoPlay={item.isGif}
+                        muted
+                        loop
+                        className="vc-gallery-media"
+                        ref={registerMedia}
+                        onLoadedMetadata={e => rememberSize(item.key, e.currentTarget.videoWidth, e.currentTarget.videoHeight)}
+                    />
+                ) : (
+                    <a href={item.url} target="_blank" rel="noreferrer" style={{ display: "block", width: "100%", height: "100%" }}>
+                        <img
+                            data-src={getQualityUrl(item.url, gifQuality)}
+                            data-vc-gallery-lazy="1"
+                            className="vc-gallery-media"
+                            alt=""
+                            ref={registerMedia}
+                            onLoad={e => rememberSize(item.key, e.currentTarget.naturalWidth, e.currentTarget.naturalHeight)}
+                            onError={e => {
+                                const card = e.currentTarget.closest(".vc-gallery-card") as HTMLElement;
+                                if (card) card.style.display = "none";
+                            }}
+                        />
+                    </a>
+                )}
+                <div className="vc-gallery-card-actions">
+                    <div className="vc-gallery-action-btn" title="Copy" onClick={e => handleCopy(item, e)}>⎘</div>
+                    <div className="vc-gallery-action-btn" title="Download" onClick={e => handleDownload(item, e)}>↓</div>
+                    <div className="vc-gallery-action-btn" title="Jump to message" onClick={e => jumpToMessage(item.messageId, e)}>↗</div>
+                </div>
+            </div>
+        );
     };
 
     return (
@@ -708,66 +812,15 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
                 <div
                     ref={gridRef}
                     className={layoutMode === "masonry" ? "vc-gallery-masonry" : "vc-gallery-grid"}
-                    style={({ "--vc-gallery-column-count": effectiveColumns, gridTemplateColumns: layoutMode === "grid" ? `repeat(${effectiveColumns}, minmax(200px, 1fr))` : undefined } as any)}
+                    style={({ gridTemplateColumns: layoutMode === "grid" ? `repeat(${effectiveColumns}, minmax(200px, 1fr))` : undefined } as any)}
                 >
-                    {displayedMedia.map(item => {
-                        const favoriteProps = getFavoriteButtonProps(item);
-                        const isVideoContent = item.isVideo || (item.isGif && VIDEO_EXT_RE.test(item.url));
-                        const aspectRatio = getAspectRatio(item, mediaSizes);
-                        const cardStyle = layoutMode === "masonry" ? { aspectRatio } : {};
-
-                        return (
-                            <div key={item.key} className={`vc-gallery-card ${layoutMode === "masonry" ? "vc-gallery-card-masonry" : ""}`} style={cardStyle}>
-                                {favoriteProps ? <div className="vc-gallery-fav-btn-wrap"><FavoriteButton {...favoriteProps} className="vc-gallery-fav-btn" /></div> : null}
-                                {isVideoContent ? (
-                                    <video
-                                        data-src={getQualityUrl(item.url, gifQuality)}
-                                        data-vc-gallery-lazy="1"
-                                        controls={!item.isGif}
-                                        autoPlay={item.isGif}
-                                        muted
-                                        loop
-                                        className="vc-gallery-media"
-                                        ref={el => {
-                                            if (!el || el.src) return;
-                                            if (observerRef.current) {
-                                                observerRef.current.observe(el);
-                                            } else {
-                                                el.dataset.vcGalleryLazy = "1";
-                                            }
-                                        }}
-                                        onLoadedMetadata={e => rememberSize(item.key, e.currentTarget.videoWidth, e.currentTarget.videoHeight)}
-                                    />
-                                ) : (
-                                    <a href={item.url} target="_blank" rel="noreferrer" style={{ display: "block", width: "100%", height: "100%" }}>
-                                        <img
-                                            data-src={getQualityUrl(item.url, gifQuality)}
-                                            className="vc-gallery-media"
-                                            alt=""
-                                            ref={el => {
-                                                if (!el || el.src) return;
-                                                if (observerRef.current) {
-                                                    observerRef.current.observe(el);
-                                                } else {
-                                                    el.dataset.vcGalleryLazy = "1";
-                                                }
-                                            }}
-                                            onLoad={e => rememberSize(item.key, e.currentTarget.naturalWidth, e.currentTarget.naturalHeight)}
-                                            onError={e => {
-                                                const card = e.currentTarget.closest(".vc-gallery-card") as HTMLElement;
-                                                if (card) card.style.display = "none";
-                                            }}
-                                        />
-                                    </a>
-                                )}
-                                <div className="vc-gallery-card-actions">
-                                    <div className="vc-gallery-action-btn" title="Copy" onClick={e => handleCopy(item, e)}>⎘</div>
-                                    <div className="vc-gallery-action-btn" title="Download" onClick={e => handleDownload(item, e)}>↓</div>
-                                    <div className="vc-gallery-action-btn" title="Jump to message" onClick={e => jumpToMessage(item.messageId, e)}>↗</div>
-                                </div>
+                    {layoutMode === "masonry"
+                        ? masonryColumns.map((column, colIndex) => (
+                            <div key={colIndex} className="vc-gallery-masonry-col">
+                                {column.map(renderCard)}
                             </div>
-                        );
-                    })}
+                        ))
+                        : displayedMedia.map(renderCard)}
                 </div>
 
                 <div style={{ display: "flex", justifyContent: "center", margin: "30px 0 10px" }}>
