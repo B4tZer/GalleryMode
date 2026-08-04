@@ -7,17 +7,20 @@
 import { findGroupChildrenByChildId } from "@api/ContextMenu";
 import { definePluginSettings } from "@api/Settings";
 import ErrorBoundary from "@components/ErrorBoundary";
-import { Logger } from "@utils/Logger";
 import { copyToClipboard } from "@utils/clipboard";
+import { Logger } from "@utils/Logger";
 import definePlugin, { OptionType } from "@utils/types";
 import { saveFile } from "@utils/web";
+import type { Channel } from "@vencord/discord-types";
 import { findByPropsLazy, findComponentByCodeLazy } from "@webpack";
 import {
+    ChannelStore,
     Menu,
     Modal,
     openModal,
     React,
     RestAPI,
+    SelectedChannelStore,
     showToast,
     Text,
     Toasts,
@@ -400,7 +403,7 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
     useEffect(() => {
         if (!gridRef.current) return;
         const ro = new ResizeObserver(entries => {
-            const width = entries[0].contentRect.width;
+            const { width } = entries[0].contentRect;
             requestAnimationFrame(() => {
                 setContainerWidth(prev => prev === width ? prev : width);
             });
@@ -526,7 +529,7 @@ function GalleryModal({ channel, modalProps }: { channel: any; modalProps: any }
                             return;
                         }
 
-                        const body = response.body;
+                        const { body } = response;
                         const next = nextSearches.find(s => s.tag === search.tag);
                         const foundMessages = body?.messages?.map((hitGroup: any[]) => hitGroup?.[0]).filter(Boolean) ?? [];
                         const totalResults = body?.total_results ?? 0;
@@ -857,6 +860,34 @@ const FilterButton = ({ label, type, activeFilter, onFilterChange }: { label: st
     return <button onClick={() => onFilterChange(type)} className={`vc-gallery-filter-btn ${isActive ? "vc-gallery-filter-btn-active" : ""}`}>{label}</button>;
 };
 
+function getGalleryChannel({ channel, thread }: { channel?: Channel; thread?: Channel; }) {
+    if (thread) return thread;
+    if (!channel) return null;
+    if (!channel.isForumLikeChannel?.()) return channel;
+
+    const selectedId = SelectedChannelStore.getChannelId();
+    const selected = selectedId ? ChannelStore.getChannel(selectedId) : null;
+    return selected?.isThread?.() && selected.parent_id === channel.id ? selected : null;
+}
+
+function patchGalleryContextMenu(children: Array<React.ReactElement | null>, args: { channel?: Channel; thread?: Channel; }) {
+    const targetChannel = getGalleryChannel(args);
+    if (!targetChannel) return;
+
+    const group = findGroupChildrenByChildId("mark-channel-read", children) ?? children;
+    group.push(
+        <Menu.MenuItem
+            id="vc-gallery-open"
+            label="Open Gallery View"
+            action={() => openModal(props => (
+                <ErrorBoundary>
+                    <GalleryModal modalProps={props} channel={targetChannel} />
+                </ErrorBoundary>
+            ))}
+        />
+    );
+}
+
 export default definePlugin({
     name: "GalleryMode",
     managedStyle: style,
@@ -866,19 +897,7 @@ export default definePlugin({
     authors: [{ name: "Sodroz", id: 145188106289545216n }],
     settings,
     contextMenus: {
-        "channel-context": (children, { channel }) => {
-            const group = findGroupChildrenByChildId("mark-channel-read", children) ?? children;
-            group.push(
-                <Menu.MenuItem
-                    id="vc-gallery-open"
-                    label="Open Gallery View"
-                    action={() => openModal(props => (
-                        <ErrorBoundary>
-                            <GalleryModal modalProps={props} channel={channel} />
-                        </ErrorBoundary>
-                    ))}
-                />
-            );
-        },
+        "channel-context": patchGalleryContextMenu,
+        "thread-context": patchGalleryContextMenu,
     },
 });
